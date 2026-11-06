@@ -198,38 +198,24 @@ func (a *Analyzer) Loop(ctx context.Context, interval time.Duration) {
 type serviceSeries struct{ total, errors []float64 }
 
 func (a *Analyzer) loadSeries(ctx context.Context, from, to time.Time) (map[string]*serviceSeries, error) {
-	b := a.opts.Bucket
-	n := int(to.Sub(from) / b)
-	rows, err := a.store.Pool.Query(ctx, `
-		SELECT service,
-			floor(extract(epoch FROM ts - $1::timestamptz) / $3)::int AS idx,
-			count(*),
-			count(*) FILTER (WHERE level IN ('ERROR','FATAL'))
-		FROM logs WHERE ts >= $1 AND ts < $2
-		GROUP BY 1, 2`, from, to, b.Seconds())
+	n := int(to.Sub(from) / a.opts.Bucket)
+	rows, err := a.store.CountSeries(ctx, from, to, a.opts.Bucket)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := map[string]*serviceSeries{}
-	for rows.Next() {
-		var svc string
-		var idx int
-		var total, errs int64
-		if err := rows.Scan(&svc, &idx, &total, &errs); err != nil {
-			return nil, err
-		}
-		s, ok := out[svc]
+	for _, r := range rows {
+		s, ok := out[r.Service]
 		if !ok {
 			s = &serviceSeries{total: make([]float64, n), errors: make([]float64, n)}
-			out[svc] = s
+			out[r.Service] = s
 		}
-		if idx >= 0 && idx < n {
-			s.total[idx] = float64(total)
-			s.errors[idx] = float64(errs)
+		if r.Index >= 0 && r.Index < n {
+			s.total[r.Index] = float64(r.Total)
+			s.errors[r.Index] = float64(r.Errors)
 		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 type topPattern struct {

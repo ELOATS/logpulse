@@ -54,7 +54,7 @@ make frontend      # 终端 2：Vite 开发服务器 http://localhost:5173（/ap
 make sample        # 导入演示数据
 ```
 
-运行测试：`make test`
+运行测试：`make test`（需要数据库的集成测试会在设置 `LOGPULSE_TEST_DATABASE_URL` 时运行，并在临时 schema 中进行，不影响已有数据）
 
 检测质量评估（模拟多种流量与抖动程度，输出误报率与不同强度故障的检出率）：
 
@@ -184,6 +184,7 @@ docker-compose.yml
 
 - `log_patterns`：模式（模板、样例、计数、首次/最近出现时间），`hash` 唯一。
 - `logs`：日志明细，`pattern_id` 关联模式；`search` 为生成列 `tsvector`，配合 GIN 索引做全文检索；`attributes` 为 JSONB。
+- `log_counts`：按 (分钟, 服务, 级别) 预聚合的计数，写入日志时在同一事务中累加。总览、趋势图和异常检测读取此表，耗时只与时间范围内的分钟数有关，不随日志总量增长；首尾不足一分钟的部分读原始日志，结果与直接统计完全一致。
 - `anomalies`：异常事件，`dedup_key` 保证重复分析幂等；`ai_insight`（JSONB）、`ai_model`、`ai_error`、`ai_generated_at` 保存 AI 分析结果。
 
 ## 后续可扩展方向

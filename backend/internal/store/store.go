@@ -98,6 +98,10 @@ func (s *Store) Ingest(ctx context.Context, entries []parser.Entry) (IngestResul
 		return IngestResult{}, err
 	}
 
+	if err := addCounts(ctx, tx, entries); err != nil {
+		return IngestResult{}, err
+	}
+
 	rows := make([][]any, len(entries))
 	for i, e := range entries {
 		attrs, err := json.Marshal(e.Attributes)
@@ -252,7 +256,8 @@ type NameCount struct {
 	Errors int64  `json:"errors"`
 }
 
-func (s *Store) Overview(ctx context.Context, from, to *time.Time) (Overview, error) {
+// overviewRaw 直接扫描 logs 表计算总览（仅用于测试对照）。
+func (s *Store) overviewRaw(ctx context.Context, from, to *time.Time) (Overview, error) {
 	o := Overview{Levels: map[string]int64{}, TopServices: []NameCount{}}
 	where, args := LogFilter{From: from, To: to}.where()
 	err := s.Pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE level IN ('ERROR','FATAL')),
@@ -307,8 +312,8 @@ type TimePoint struct {
 	Warns  int64     `json:"warns"`
 }
 
-// Timeseries 按时间桶聚合日志量。from/to 为空时使用数据的实际时间范围。
-func (s *Store) Timeseries(ctx context.Context, f LogFilter, bucket time.Duration) ([]TimePoint, error) {
+// timeseriesRaw 直接扫描 logs 表按时间桶聚合（带全文检索、主机、模式等条件时使用）。
+func (s *Store) timeseriesRaw(ctx context.Context, f LogFilter, bucket time.Duration) ([]TimePoint, error) {
 	if bucket < time.Second {
 		bucket = time.Minute
 	}

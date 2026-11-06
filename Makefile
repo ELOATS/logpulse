@@ -15,7 +15,7 @@ backend:       ## 本地运行后端（需先 make db）
 frontend:      ## 本地运行前端开发服务器（http://localhost:5173）
 	cd frontend && npm install && npm run dev
 
-test:
+test:          ## 单元测试；设置 LOGPULSE_TEST_DATABASE_URL 时同时运行数据库集成测试
 	cd backend && go vet ./... && go test ./...
 	cd frontend && npm run typecheck
 
