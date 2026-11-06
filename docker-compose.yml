@@ -20,6 +20,10 @@ services:
     environment:
       DATABASE_URL: postgres://loganalyzer:loganalyzer@postgres:5432/loganalyzer?sslmode=disable
       ANALYZE_INTERVAL: 1m
+      # 设置后启用 AI 异常分析（读取宿主机环境变量或 .env 文件）
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-claude-opus-5-5}
+      LLM_EFFORT: ${LLM_EFFORT:-medium}
     ports:
       - "8080:8080"
     depends_on:

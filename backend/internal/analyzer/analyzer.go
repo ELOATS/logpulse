@@ -25,6 +25,9 @@ type Analyzer struct {
 	opts    Options
 	log     *slog.Logger
 	trigger chan struct{}
+
+	// AfterRun 在每轮检测成功后调用（例如生成大模型摘要），可为空。
+	AfterRun func(ctx context.Context)
 }
 
 func New(s *store.Store, opts Options, log *slog.Logger) *Analyzer {
@@ -183,6 +186,9 @@ func (a *Analyzer) Loop(ctx context.Context, interval time.Duration) {
 			}
 			if res.NewAnomalies > 0 {
 				a.log.Info("anomalies detected", "new", res.NewAnomalies, "total", res.Detected)
+			}
+			if a.AfterRun != nil {
+				a.AfterRun(ctx)
 			}
 		}
 	}

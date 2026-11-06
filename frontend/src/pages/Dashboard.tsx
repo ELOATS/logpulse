@@ -109,7 +109,10 @@ export default function Dashboard() {
               {anomalies.data.map((a) => (
                 <li key={a.id} className="flex items-start gap-2 py-2.5 text-sm first:pt-0 last:pb-0">
                   <SeverityBadge severity={a.severity} />
-                  <span className="min-w-0 flex-1">{a.description}</span>
+                  <span className="min-w-0 flex-1">
+                    {a.ai_insight?.summary ?? a.description}
+                    {a.ai_insight && <span className="ml-1 text-xs text-violet-600 dark:text-violet-400">· AI</span>}
+                  </span>
                 </li>
               ))}
             </ul>

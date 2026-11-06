@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/eloats/logpulse/backend/internal/analyzer"
+	"github.com/eloats/logpulse/backend/internal/llm"
 	"github.com/eloats/logpulse/backend/internal/parser"
 	"github.com/eloats/logpulse/backend/internal/store"
 	"github.com/jackc/pgx/v5"
@@ -29,7 +30,8 @@ type Server struct {
 	Log           *slog.Logger
 	AllowedOrigin string
 	MaxUploadMB   int64
-	StaticDir     string // 可选：同时托管前端构建产物
+	StaticDir     string       // 可选：同时托管前端构建产物
+	Insights      *llm.Service // 可选：未配置 ANTHROPIC_API_KEY 时为 nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -44,7 +46,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/patterns", s.patterns)
 	mux.HandleFunc("GET /api/anomalies", s.anomalies)
 	mux.HandleFunc("POST /api/anomalies/{id}/ack", s.ackAnomaly)
+	mux.HandleFunc("POST /api/anomalies/{id}/insight", s.generateInsight)
 	mux.HandleFunc("POST /api/analyze", s.analyze)
+	mux.HandleFunc("GET /api/features", s.features)
 	if s.StaticDir != "" {
 		mux.Handle("/", spaHandler(s.StaticDir))
 	}
@@ -334,6 +338,38 @@ func (s *Server) ackAnomaly(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "acknowledged": ack})
+}
+
+func (s *Server) features(w http.ResponseWriter, _ *http.Request) {
+	f := map[string]any{"ai_insight": s.Insights != nil}
+	if s.Insights != nil {
+		f["ai_model"] = s.Insights.Summarizer.Model()
+	}
+	writeJSON(w, http.StatusOK, f)
+}
+
+func (s *Server) generateInsight(w http.ResponseWriter, r *http.Request) {
+	if s.Insights == nil {
+		writeError(w, http.StatusServiceUnavailable, "未启用 AI 分析：请为后端设置 ANTHROPIC_API_KEY")
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	a, err := s.Insights.Generate(r.Context(), id)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		writeError(w, http.StatusNotFound, "anomaly not found")
+	case errors.Is(err, llm.ErrRefused):
+		writeError(w, http.StatusUnprocessableEntity, "模型拒绝分析该内容："+err.Error())
+	case err != nil:
+		s.Log.Error("generate insight", "id", id, "err", err)
+		writeError(w, http.StatusBadGateway, "AI 分析生成失败："+err.Error())
+	default:
+		writeJSON(w, http.StatusOK, a)
+	}
 }
 
 func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {

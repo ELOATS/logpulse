@@ -5,6 +5,7 @@ import { Check, RefreshCw, RotateCcw } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type Anomaly } from '../lib/api'
 import { fmtNumber, fmtTime } from '../lib/format'
+import InsightPanel from '../components/InsightPanel'
 import { Card, Empty, ErrorBox, LevelBadge, PageHeader, SeverityBadge, buttonClass, ghostButtonClass, inputClass } from '../components/ui'
 
 const kindLabel: Record<Anomaly['kind'], string> = {
@@ -116,6 +117,7 @@ export default function Anomalies() {
                   </ul>
                 </div>
               )}
+              <InsightPanel anomaly={a} />
               {a.kind === 'new_pattern' && a.details.sample && (
                 <div className="mt-3 rounded-md bg-zinc-50 p-3 font-mono text-xs break-all dark:bg-zinc-800/50">
                   例：{a.details.sample}

@@ -429,6 +429,23 @@ type Anomaly struct {
 	Details      json.RawMessage `json:"details"`
 	Acknowledged bool            `json:"acknowledged"`
 	CreatedAt    time.Time       `json:"created_at"`
+
+	AIInsight     json.RawMessage `json:"ai_insight"`
+	AIModel       *string         `json:"ai_model"`
+	AIError       *string         `json:"ai_error"`
+	AIGeneratedAt *time.Time      `json:"ai_generated_at"`
+}
+
+const anomalyColumns = `id, kind, severity, service, pattern_id, window_start, window_end,
+	score, observed, expected, description, details, acknowledged, created_at,
+	ai_insight, ai_model, ai_error, ai_generated_at`
+
+func scanAnomaly(row pgx.Row) (Anomaly, error) {
+	var a Anomaly
+	err := row.Scan(&a.ID, &a.Kind, &a.Severity, &a.Service, &a.PatternID, &a.WindowStart, &a.WindowEnd,
+		&a.Score, &a.Observed, &a.Expected, &a.Description, &a.Details, &a.Acknowledged, &a.CreatedAt,
+		&a.AIInsight, &a.AIModel, &a.AIError, &a.AIGeneratedAt)
+	return a, err
 }
 
 // UpsertAnomaly 按 dedup_key 去重写入，返回是否为新异常。
@@ -485,18 +502,54 @@ func (s *Store) Anomalies(ctx context.Context, f AnomalyFilter) ([]Anomaly, erro
 		where = "WHERE " + strings.Join(conds, " AND ")
 	}
 	args = append(args, f.Limit)
-	rows, err := s.Pool.Query(ctx, fmt.Sprintf(`SELECT id, kind, severity, service, pattern_id, window_start, window_end,
-		score, observed, expected, description, details, acknowledged, created_at
-		FROM anomalies %s ORDER BY window_start DESC, score DESC LIMIT $%d`, where, len(args)), args...)
+	rows, err := s.Pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM anomalies %s
+		ORDER BY window_start DESC, score DESC LIMIT $%d`, anomalyColumns, where, len(args)), args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []Anomaly{}
 	for rows.Next() {
-		var a Anomaly
-		if err := rows.Scan(&a.ID, &a.Kind, &a.Severity, &a.Service, &a.PatternID, &a.WindowStart, &a.WindowEnd,
-			&a.Score, &a.Observed, &a.Expected, &a.Description, &a.Details, &a.Acknowledged, &a.CreatedAt); err != nil {
+		a, err := scanAnomaly(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetAnomaly(ctx context.Context, id int64) (Anomaly, error) {
+	return scanAnomaly(s.Pool.QueryRow(ctx, `SELECT `+anomalyColumns+` FROM anomalies WHERE id = $1`, id))
+}
+
+// SaveInsight 保存大模型分析结果；errMsg 非空表示生成失败。
+func (s *Store) SaveInsight(ctx context.Context, id int64, insight any, model, errMsg string) error {
+	var raw []byte
+	if insight != nil {
+		var err error
+		if raw, err = json.Marshal(insight); err != nil {
+			return err
+		}
+	}
+	_, err := s.Pool.Exec(ctx, `UPDATE anomalies SET ai_insight = $2, ai_model = NULLIF($3, ''),
+		ai_error = NULLIF($4, ''), ai_generated_at = now() WHERE id = $1`, id, raw, model, errMsg)
+	return err
+}
+
+// PendingInsights 返回尚未生成（也未失败过）分析的未确认中/高危异常，严重者优先。
+func (s *Store) PendingInsights(ctx context.Context, limit int) ([]Anomaly, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT `+anomalyColumns+` FROM anomalies
+		WHERE ai_generated_at IS NULL AND NOT acknowledged AND severity IN ('medium', 'high')
+		ORDER BY (severity = 'high') DESC, window_start DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Anomaly
+	for rows.Next() {
+		a, err := scanAnomaly(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, a)

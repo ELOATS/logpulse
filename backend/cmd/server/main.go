@@ -15,6 +15,7 @@ import (
 	"github.com/eloats/logpulse/backend/internal/api"
 	"github.com/eloats/logpulse/backend/internal/config"
 	"github.com/eloats/logpulse/backend/internal/db"
+	"github.com/eloats/logpulse/backend/internal/llm"
 	"github.com/eloats/logpulse/backend/internal/store"
 )
 
@@ -43,6 +44,17 @@ func main() {
 		MinCount:        cfg.MinCount,
 		Lookback:        cfg.AnalyzeLookback,
 	}, log)
+	var insights *llm.Service
+	if cfg.LLMEnabled {
+		insights = &llm.Service{
+			Store: st, Log: log, SampleLines: cfg.LLMSampleLines, AutoPerRun: cfg.LLMAutoPerRun,
+			Summarizer: llm.New(cfg.LLMModel, cfg.LLMEffort),
+		}
+		if cfg.LLMAutoSummarize {
+			an.AfterRun = insights.AutoGenerate
+		}
+		log.Info("ai insight enabled", "model", cfg.LLMModel, "effort", cfg.LLMEffort, "auto", cfg.LLMAutoSummarize)
+	}
 	go an.Loop(ctx, cfg.AnalyzeInterval)
 
 	srv := &http.Server{
@@ -50,7 +62,7 @@ func main() {
 		Handler: (&api.Server{
 			Store: st, Analyzer: an, Log: log,
 			AllowedOrigin: cfg.AllowedOrigin, MaxUploadMB: cfg.MaxUploadMB,
-			StaticDir: os.Getenv("STATIC_DIR"),
+			StaticDir: os.Getenv("STATIC_DIR"), Insights: insights,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

@@ -18,6 +18,14 @@ type Config struct {
 	ZThreshold      float64       // 触发异常的 z-score 阈值
 	MinCount        int           // 触发异常所需的最小计数
 	AnalyzeLookback time.Duration // 每次分析回溯的时间范围
+
+	// 大模型异常摘要（设置 ANTHROPIC_API_KEY 后启用）
+	LLMEnabled       bool
+	LLMModel         string
+	LLMEffort        string // low | medium | high | xhigh | max
+	LLMAutoSummarize bool   // 自动为新的中/高危异常生成摘要
+	LLMAutoPerRun    int    // 每轮检测最多自动生成的摘要数，控制成本
+	LLMSampleLines   int    // 每个异常附带的样例日志行数
 }
 
 func Load() Config {
@@ -32,6 +40,13 @@ func Load() Config {
 		ZThreshold:      envFloat("ANALYZE_Z_THRESHOLD", 3),
 		MinCount:        envInt("ANALYZE_MIN_COUNT", 5),
 		AnalyzeLookback: envDuration("ANALYZE_LOOKBACK", 24*time.Hour),
+
+		LLMEnabled:       os.Getenv("ANTHROPIC_API_KEY") != "" && env("LLM_ENABLED", "true") != "false",
+		LLMModel:         env("LLM_MODEL", "claude-opus-5-5"),
+		LLMEffort:        env("LLM_EFFORT", "medium"),
+		LLMAutoSummarize: env("LLM_AUTO_SUMMARIZE", "true") != "false",
+		LLMAutoPerRun:    envInt("LLM_AUTO_PER_RUN", 3),
+		LLMSampleLines:   envInt("LLM_SAMPLE_LINES", 30),
 	}
 }
 

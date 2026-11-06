@@ -62,7 +62,21 @@ export interface Anomaly {
   details: { top_patterns?: TopPattern[]; template?: string; sample?: string; count?: number }
   acknowledged: boolean
   created_at: string
+  ai_insight: AIInsight | null
+  ai_model: string | null
+  ai_error: string | null
+  ai_generated_at: string | null
 }
+
+export interface AIInsight {
+  summary: string
+  impact: string
+  likely_causes: { cause: string; evidence: string }[]
+  next_steps: string[]
+  confidence: 'low' | 'medium' | 'high'
+}
+
+export interface Features { ai_insight: boolean; ai_model?: string }
 
 export interface IngestResult { accepted: number; new_patterns: number }
 export interface AnalyzeResult { from: string; to: string; services: number; detected: number; new_anomalies: number; duration_ms: number }
@@ -98,6 +112,8 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ acknowledged }),
     }),
+  features: () => request<Features>('/api/features'),
+  generateInsight: (id: number) => request<Anomaly>(`/api/anomalies/${id}/insight`, { method: 'POST' }),
   analyze: () => request<AnalyzeResult>('/api/analyze', { method: 'POST' }),
   upload: (file: File, service: string) => {
     const fd = new FormData()
