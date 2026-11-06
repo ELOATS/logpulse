@@ -103,7 +103,7 @@ export default function Dashboard() {
           label="待处理异常" to="/anomalies"
           tone={bySeverity.high ? 'danger' : open.length ? 'warn' : undefined}
           value={anomalies.data ? open.length : <Skeleton className="h-8 w-10" />}
-          hint={open.length ? `高危 ${bySeverity.high} · 中危 ${bySeverity.medium} · 低危 ${bySeverity.low}` : '当前没有待处理异常'}
+          hint={!anomalies.data ? undefined : open.length ? `高危 ${bySeverity.high} · 中危 ${bySeverity.medium} · 低危 ${bySeverity.low}` : '当前没有待处理异常'}
         />
       </div>
 
@@ -119,7 +119,7 @@ export default function Dashboard() {
           </span>
         }
       >
-        {series.isLoading ? <Skeleton className="h-72" /> : (
+        {series.isPending ? <Skeleton className="h-72" /> : (
           <TrendCharts points={pts} anomalies={inRange} bucketMs={durationMs(bucket)} first={o?.first_log ?? undefined} last={o?.last_log ?? undefined} />
         )}
       </Card>
@@ -135,7 +135,7 @@ export default function Dashboard() {
             className="flex-1"
             actions={<Link to="/patterns?level=ERROR" className="text-xs text-indigo-600 hover:underline dark:text-indigo-400">全部</Link>}
           >
-            {patterns.isLoading ? (
+            {patterns.isPending ? (
               <SkeletonRows rows={4} />
             ) : patterns.data?.length ? (
               <ul className="-my-1.5 divide-y divide-zinc-100 dark:divide-zinc-800">
@@ -162,7 +162,7 @@ export default function Dashboard() {
 }
 
 function Attention({ anomalies, loading }: { anomalies: Anomaly[]; loading: boolean }) {
-  if (loading) return <Skeleton className="h-20 rounded-xl" />
+  if (loading) return <Skeleton className="h-[146px] rounded-xl" />
   if (!anomalies.length) {
     return (
       <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300">

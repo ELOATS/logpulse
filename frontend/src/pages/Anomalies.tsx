@@ -7,6 +7,7 @@ import { api, type Anomaly } from '../lib/api'
 import { fmtNumber, fmtRelative, fmtTime } from '../lib/format'
 import { severityStripe } from '../lib/levels'
 import InsightPanel from '../components/InsightPanel'
+import { useToast } from '../components/Toast'
 import { Card, Empty, ErrorBox, LevelBadge, PageHeader, Segmented, SeverityBadge, SkeletonRows, Template, buttonClass, ghostButtonClass } from '../components/ui'
 
 const kinds: Record<Anomaly['kind'], { label: string; icon: typeof Activity }> = {
@@ -36,7 +37,28 @@ export default function Anomalies() {
   }
   const analyze = useMutation({ mutationFn: api.analyze, onSuccess: invalidate })
 
-  const all = anomalies.data ?? []
+  // 确认/重新打开：乐观更新（卡片立即移出当前列表），失败时回滚，成功后给出可撤销的提示
+  const toast = useToast()
+  const ack = useMutation({
+    mutationFn: ({ a, value }: { a: Anomaly; value: boolean }) => api.ackAnomaly(a.id, value),
+    onMutate: async ({ a, value }) => {
+      await qc.cancelQueries({ queryKey: ['anomalies'] })
+      const snapshot = qc.getQueriesData<Anomaly[]>({ queryKey: ['anomalies'] })
+      qc.setQueriesData<Anomaly[]>({ queryKey: ['anomalies'] }, (old) =>
+        old?.map((x) => (x.id === a.id ? { ...x, acknowledged: value } : x)),
+      )
+      return { snapshot }
+    },
+    onError: (_e, _v, ctx) => ctx?.snapshot.forEach(([key, data]) => qc.setQueryData(key, data)),
+    onSuccess: (_d, { a, value }) =>
+      toast({
+        message: value ? `已确认：${kinds[a.kind].label} · ${a.service || '(未命名)'}` : '已重新打开',
+        action: value ? { label: '撤销', onClick: () => ack.mutate({ a, value: false }) } : undefined,
+      }),
+    onSettled: invalidate,
+  })
+
+  const all = (anomalies.data ?? []).filter((a) => status === 'all' || a.acknowledged === (status === 'acked'))
   const list = kind ? all.filter((a) => a.kind === kind) : all
   const count = (k: Anomaly['kind']) => all.filter((a) => a.kind === k).length
 
@@ -89,15 +111,14 @@ export default function Anomalies() {
         </Card>
       ) : (
         <div className="space-y-3">
-          {list.map((a) => <AnomalyCard key={a.id} a={a} aiEnabled={!!features.data?.ai_insight} onChanged={invalidate} />)}
+          {list.map((a) => <AnomalyCard key={a.id} a={a} aiEnabled={!!features.data?.ai_insight} onAck={(value) => ack.mutate({ a, value })} />)}
         </div>
       )}
     </>
   )
 }
 
-function AnomalyCard({ a, aiEnabled, onChanged }: { a: Anomaly; aiEnabled: boolean; onChanged: () => void }) {
-  const ack = useMutation({ mutationFn: (value: boolean) => api.ackAnomaly(a.id, value), onSuccess: onChanged })
+function AnomalyCard({ a, aiEnabled, onAck }: { a: Anomaly; aiEnabled: boolean; onAck: (value: boolean) => void }) {
   const Icon = kinds[a.kind].icon
   const logsLink = a.kind === 'new_pattern' && a.pattern_id
     ? `/logs?pattern_id=${a.pattern_id}`
@@ -119,7 +140,7 @@ function AnomalyCard({ a, aiEnabled, onChanged }: { a: Anomaly; aiEnabled: boole
         </span>
         <div className="ml-auto flex gap-2">
           <Link to={logsLink} className={clsx(ghostButtonClass, 'px-2.5 py-1 text-xs')}><ScrollText className="size-3.5" />查看日志</Link>
-          <button className={clsx(ghostButtonClass, 'px-2.5 py-1 text-xs')} onClick={() => ack.mutate(!a.acknowledged)} disabled={ack.isPending}>
+          <button className={clsx(ghostButtonClass, 'px-2.5 py-1 text-xs')} onClick={() => onAck(!a.acknowledged)}>
             {a.acknowledged ? <><RotateCcw className="size-3.5" />重新打开</> : <><Check className="size-3.5" />确认</>}
           </button>
         </div>
@@ -143,7 +164,7 @@ function AnomalyCard({ a, aiEnabled, onChanged }: { a: Anomaly; aiEnabled: boole
                   <li key={p.pattern_id}>
                     <Link to={`/logs?pattern_id=${p.pattern_id}`} className="group flex items-center gap-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs hover:bg-zinc-100 dark:bg-zinc-800/50 dark:hover:bg-zinc-800">
                       <LevelBadge level={p.level} />
-                      <Template text={p.template} className="min-w-0 flex-1 truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400" />
+                      <Template text={p.template} className="line-clamp-2 min-w-0 flex-1 [overflow-wrap:anywhere] group-hover:text-indigo-600 dark:group-hover:text-indigo-400" />
                       <span className="tabular-nums text-zinc-500">{fmtNumber(p.count)}</span>
                     </Link>
                   </li>

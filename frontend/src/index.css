@@ -17,3 +17,14 @@ pre, code, .font-mono { font-variant-ligatures: none; font-feature-settings: "li
 /* 定位到某条异常时短暂高亮 */
 @keyframes flash { from { box-shadow: 0 0 0 3px rgb(99 102 241 / 0.6); } to { box-shadow: 0 0 0 3px rgb(99 102 241 / 0); } }
 .flash { animation: flash 1.6s ease-out 1; }
+
+/* 键盘焦点：统一的品牌色焦点环（鼠标点击不显示） */
+:focus { outline: none; }
+:focus-visible { outline: 2px solid rgb(99 102 241); outline-offset: 2px; border-radius: 6px; }
+
+/* 可横向滚动但隐藏滚动条（窄屏下的分段选择器） */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.toast-in { animation: toast-in 0.18s ease-out; }

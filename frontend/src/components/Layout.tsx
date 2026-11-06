@@ -1,4 +1,5 @@
-import { NavLink, Outlet } from 'react-router'
+import { useEffect, useRef } from 'react'
+import { NavLink, Outlet, useLocation } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { Activity, AlertTriangle, LayoutDashboard, Layers, Monitor, Moon, ScrollText, Sun, Upload } from 'lucide-react'
 import clsx from 'clsx'
@@ -57,6 +58,11 @@ function Brand() {
 }
 
 export default function Layout() {
+  const mainRef = useRef<HTMLElement>(null)
+  const { pathname, hash } = useLocation()
+  useEffect(() => {
+    if (!hash) mainRef.current?.scrollTo({ top: 0 })
+  }, [pathname, hash])
   const { data } = useQuery({ queryKey: ['overview', 'all'], queryFn: () => api.overview(), refetchInterval: 30_000 })
   const open = data?.open_anomalies ?? 0
   const badge = (to: string) =>
@@ -102,7 +108,7 @@ export default function Layout() {
           <Brand />
           <ThemeSwitch />
         </header>
-        <main className="min-w-0 flex-1 overflow-y-auto pb-20 md:pb-0">
+        <main ref={mainRef} className="min-w-0 flex-1 overflow-y-auto pb-20 md:pb-0">
           <div className="mx-auto max-w-7xl px-4 py-5 md:px-8 md:py-7">
             <Outlet />
           </div>

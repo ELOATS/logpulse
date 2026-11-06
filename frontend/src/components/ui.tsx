@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import clsx from 'clsx'
 import type { Level, Severity } from '../lib/api'
@@ -21,6 +21,9 @@ export function Card({ title, actions, children, className, bodyClassName, flush
 }
 
 export function PageHeader({ title, description, actions }: { title: string; description?: ReactNode; actions?: ReactNode }) {
+  useEffect(() => {
+    document.title = `${title} · LogPulse`
+  }, [title])
   return (
     <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
       <div className="min-w-0">
@@ -117,14 +120,14 @@ export function Segmented<T extends string>({ value, onChange, options, size = '
   value: T; onChange: (v: T) => void; options: { value: T; label: ReactNode }[]; size?: 'sm' | 'md'
 }) {
   return (
-    <div className="inline-flex shrink-0 rounded-lg border border-zinc-200 bg-zinc-100/60 p-0.5 dark:border-zinc-800 dark:bg-zinc-900">
+    <div className="no-scrollbar inline-flex max-w-full shrink-0 overflow-x-auto rounded-lg border border-zinc-200 bg-zinc-100/60 p-0.5 dark:border-zinc-800 dark:bg-zinc-900">
       {options.map((o) => (
         <button
           key={o.value}
           onClick={() => onChange(o.value)}
           aria-pressed={value === o.value}
           className={clsx(
-            'rounded-md whitespace-nowrap transition-colors',
+            'shrink-0 rounded-md whitespace-nowrap transition-colors',
             size === 'sm' ? 'px-2 py-0.5 text-xs' : 'px-3 py-1 text-sm',
             value === o.value
               ? 'bg-white font-medium text-zinc-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-50'
@@ -170,6 +173,9 @@ export function Highlight({ text, query }: { text: string; query: string }) {
     </>
   )
 }
+
+export const codeBlockClass =
+  'overflow-auto rounded-lg bg-zinc-900 p-3 font-mono text-xs leading-5 text-zinc-100 ring-1 ring-zinc-900/5 dark:bg-black/50 dark:ring-white/10'
 
 export const inputClass =
   'h-9 rounded-lg border border-zinc-300 bg-white px-3 text-sm outline-none transition-shadow focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-900'

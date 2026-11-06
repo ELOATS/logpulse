@@ -1,11 +1,11 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Check, ChevronDown, ChevronRight, Copy, Search, SearchX, X } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type Level, type LogRow } from '../lib/api'
 import { fmtCompact, fmtNumber, fmtTime } from '../lib/format'
-import { Card, Empty, ErrorBox, Highlight, LevelBadge, PageHeader, SkeletonRows, buttonClass, ghostButtonClass, inputClass } from '../components/ui'
+import { Card, Empty, ErrorBox, Highlight, LevelBadge, PageHeader, SkeletonRows, buttonClass, codeBlockClass, ghostButtonClass, inputClass } from '../components/ui'
 
 const PAGE_SIZE = 50
 const LEVEL_CHIPS: { label: string; levels: Level[]; cls: string }[] = [
@@ -28,7 +28,25 @@ export default function Logs() {
   const to = params.get('to') ?? ''
   const page = Number(params.get('page') ?? 0)
   const [draft, setDraft] = useState(q)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
   const activeLevels = new Set(level.split(',').filter(Boolean))
+
+  useEffect(() => setDraft(q), [q])
+
+  // 快捷键：按 / 聚焦搜索框
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement
+      if (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) {
+        e.preventDefault()
+        searchRef.current?.focus()
+        searchRef.current?.select()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   const services = useQuery({ queryKey: ['services'], queryFn: api.services })
   const logs = useQuery({
@@ -55,6 +73,10 @@ export default function Logs() {
     e.preventDefault()
     update({ q: draft.trim() })
   }
+  const goPage = (n: number) => {
+    update({ page: n ? String(n) : '' })
+    listRef.current?.scrollIntoView({ block: 'start' })
+  }
   const hasFilters = !!(q || level || service || patternId || from || to)
   const clearAll = () => {
     setDraft('')
@@ -73,7 +95,16 @@ export default function Logs() {
         <form onSubmit={onSubmit} className="flex gap-2">
           <div className="relative min-w-0 flex-1">
             <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-zinc-400" />
-            <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="搜索日志内容…" className={`${inputClass} w-full pl-9`} />
+            <input
+              ref={searchRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape') { setDraft(''); if (q) update({ q: '' }) } }}
+              placeholder="搜索日志内容…"
+              aria-label="搜索日志"
+              className={`${inputClass} w-full pr-10 pl-9`}
+            />
+            <kbd className="pointer-events-none absolute top-2 right-2.5 hidden rounded border border-zinc-200 px-1.5 font-mono text-[11px] text-zinc-400 sm:block dark:border-zinc-700">/</kbd>
           </div>
           <button className={buttonClass}>搜索</button>
         </form>
@@ -102,6 +133,7 @@ export default function Logs() {
         </div>
       </Card>
 
+      <div ref={listRef} className="scroll-mt-4" />
       <Card
         className="mt-4"
         flush
@@ -128,9 +160,9 @@ export default function Logs() {
 
       {pages > 1 && (
         <div className="mt-4 flex items-center justify-end gap-2 text-sm">
-          <button className={ghostButtonClass} disabled={page === 0} onClick={() => update({ page: String(page - 1) })}>上一页</button>
+          <button className={ghostButtonClass} disabled={page === 0} onClick={() => goPage(page - 1)}>上一页</button>
           <span className="px-2 tabular-nums text-zinc-500">{page + 1} / {fmtNumber(pages)}</span>
-          <button className={ghostButtonClass} disabled={page + 1 >= pages} onClick={() => update({ page: String(page + 1) })}>下一页</button>
+          <button className={ghostButtonClass} disabled={page + 1 >= pages} onClick={() => goPage(page + 1)}>下一页</button>
         </div>
       )}
     </>
@@ -197,7 +229,7 @@ function LogDetail({ row, attrs, stack }: { row: LogRow; attrs: [string, unknown
       {stack && (
         <div>
           <div className="mb-1 text-zinc-500">堆栈</div>
-          <pre className="max-h-72 overflow-auto rounded-lg bg-zinc-900 p-3 leading-5 text-zinc-100">{stack}</pre>
+          <pre className={`${codeBlockClass} max-h-72`}>{stack}</pre>
         </div>
       )}
       <div>
@@ -207,7 +239,7 @@ function LogDetail({ row, attrs, stack }: { row: LogRow; attrs: [string, unknown
             {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{copied ? '已复制' : '复制'}
           </button>
         </div>
-        <pre className="max-h-72 overflow-auto rounded-lg bg-zinc-900 p-3 leading-5 break-all whitespace-pre-wrap text-zinc-100">{row.raw}</pre>
+        <pre className={`${codeBlockClass} max-h-72 break-all whitespace-pre-wrap`}>{row.raw}</pre>
       </div>
     </div>
   )
