@@ -151,7 +151,13 @@ type LogRow struct {
 type LogPage struct {
 	Items []LogRow `json:"items"`
 	Total int64    `json:"total"`
+	// TotalCapped 为 true 表示匹配数超过计数上限，Total 是下限（显示为"10,000+"）
+	TotalCapped bool `json:"total_capped"`
 }
+
+// countCap 是检索结果计数的上限：精确统计大量匹配需要扫描全部匹配行，
+// 而界面只需要知道"有很多"。翻页超过上限时会相应提高。
+const countCap = 10000
 
 func (f LogFilter) where() (string, []any) {
 	var conds []string
@@ -200,8 +206,12 @@ func (s *Store) SearchLogs(ctx context.Context, f LogFilter) (LogPage, error) {
 	}
 	where, args := f.where()
 	page := LogPage{Items: []LogRow{}}
-	if err := s.Pool.QueryRow(ctx, "SELECT count(*) FROM logs "+where, args...).Scan(&page.Total); err != nil {
+	limit := int64(max(countCap, f.Offset+f.Limit))
+	if err := s.Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM (SELECT 1 FROM logs %s LIMIT %d) t", where, limit+1), args...).Scan(&page.Total); err != nil {
 		return page, err
+	}
+	if page.Total > limit {
+		page.Total, page.TotalCapped = limit, true
 	}
 	args = append(args, f.Limit, f.Offset)
 	q := fmt.Sprintf(`SELECT id, ts, level, service, host, message, raw, format, attributes, pattern_id

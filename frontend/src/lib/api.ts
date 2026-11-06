@@ -17,7 +17,7 @@ export interface LogRow {
   pattern_id: number | null
 }
 
-export interface LogPage { items: LogRow[]; total: number }
+export interface LogPage { items: LogRow[]; total: number; total_capped?: boolean }
 
 export interface Overview {
   total_logs: number

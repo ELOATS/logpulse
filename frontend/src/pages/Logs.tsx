@@ -84,7 +84,10 @@ export default function Logs() {
   }
 
   const total = logs.data?.total ?? 0
+  const capped = !!logs.data?.total_capped
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const hasNext = page + 1 < pages || (capped && (logs.data?.items.length ?? 0) === PAGE_SIZE)
+  const totalLabel = `${fmtNumber(total)}${capped ? '+' : ''}`
   const start = total ? page * PAGE_SIZE + 1 : 0
   const end = Math.min(total, (page + 1) * PAGE_SIZE)
 
@@ -137,7 +140,7 @@ export default function Logs() {
       <Card
         className="mt-4"
         flush
-        title={logs.data ? <>共 {fmtNumber(total)} 条{total > 0 && <span className="ml-2 font-normal text-zinc-500">显示 {fmtNumber(start)}–{fmtNumber(end)}</span>}</> : '加载中…'}
+        title={logs.data ? <>共 {totalLabel} 条{total > 0 && <span className="ml-2 font-normal text-zinc-500">显示 {fmtNumber(start)}–{fmtNumber(end)}</span>}</> : '加载中…'}
       >
         {logs.error ? (
           <div className="p-4"><ErrorBox error={logs.error} /></div>
@@ -158,11 +161,11 @@ export default function Logs() {
         )}
       </Card>
 
-      {pages > 1 && (
+      {(pages > 1 || hasNext) && (
         <div className="mt-4 flex items-center justify-end gap-2 text-sm">
           <button className={ghostButtonClass} disabled={page === 0} onClick={() => goPage(page - 1)}>上一页</button>
-          <span className="px-2 tabular-nums text-zinc-500">{page + 1} / {fmtNumber(pages)}</span>
-          <button className={ghostButtonClass} disabled={page + 1 >= pages} onClick={() => goPage(page + 1)}>下一页</button>
+          <span className="px-2 tabular-nums text-zinc-500">{page + 1} / {fmtNumber(pages)}{capped ? '+' : ''}</span>
+          <button className={ghostButtonClass} disabled={!hasNext} onClick={() => goPage(page + 1)}>下一页</button>
         </div>
       )}
     </>
