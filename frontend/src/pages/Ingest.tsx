@@ -7,7 +7,13 @@ import { fmtNumber } from '../lib/format'
 import { Card, ErrorBox, PageHeader, buttonClass, inputClass } from '../components/ui'
 
 const EXAMPLE = `{"ts":"2024-05-01T10:00:00Z","level":"error","service":"api","msg":"db timeout after 3000ms"}
+time=2024-05-01T10:00:00Z level=ERROR msg="query failed" err="context deadline exceeded"
 2024-05-01 10:00:01 WARN [order-service] stock low for sku 991
+panic: runtime error: invalid memory address or nil pointer dereference
+
+goroutine 1 [running]:
+main.handler(...)
+	/app/main.go:42 +0x1d
 127.0.0.1 - - [01/May/2024:10:00:02 +0000] "GET /api/users/42 HTTP/1.1" 500 512 "-" "curl/8.0"
 May  1 10:00:03 web-01 sshd[1234]: Failed password for root from 1.2.3.4`
 
@@ -36,7 +42,7 @@ export default function Ingest() {
 
   return (
     <>
-      <PageHeader title="导入日志" description="自动识别 JSON 行日志、Nginx/Apache 访问日志、Syslog 与常见文本日志格式" />
+      <PageHeader title="导入日志" description="自动识别 JSON、logfmt（Go slog / logrus）、Go 标准库 log、zap、Nginx/Apache 访问日志、Syslog 等格式，并将 Go panic、JS/Java 异常堆栈合并为一条日志" />
       <div className="mb-4 max-w-sm">
         <label className="text-sm">
           <span className="mb-1 block text-zinc-600 dark:text-zinc-400">默认服务名（日志中未包含服务名时使用）</span>
@@ -81,6 +87,7 @@ export default function Ingest() {
           </button>
         </Card>
       </div>
+      <FrontendSnippet />
       <Card title="通过 API 推送" className="mt-4">
         <pre className="overflow-x-auto rounded bg-zinc-900 p-3 font-mono text-xs text-zinc-100">{`# JSON 数组
 curl -X POST http://localhost:8080/api/logs -H 'Content-Type: application/json' \\
@@ -91,5 +98,34 @@ tail -n 1000 /var/log/nginx/access.log | \\
   curl -X POST 'http://localhost:8080/api/logs?service=nginx' --data-binary @-`}</pre>
       </Card>
     </>
+  )
+}
+
+function FrontendSnippet() {
+  const origin = window.location.origin
+  const snippet = `<!-- 放在 <head> 中尽量靠前的位置 -->
+<script src="${origin}/logpulse-browser.js"
+        data-endpoint="${origin}/api/logs"
+        data-service="web-frontend"
+        data-release="1.0.0"></script>`
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    navigator.clipboard?.writeText(snippet).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+  return (
+    <Card
+      title="采集前端错误"
+      className="mt-4"
+      actions={<button className="text-xs text-indigo-600 hover:underline dark:text-indigo-400" onClick={copy}>{copied ? '已复制' : '复制'}</button>}
+    >
+      <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">
+        在网页中加入以下脚本，自动上报未处理的 JS 异常、未处理的 Promise 拒绝和资源加载失败（含堆栈、页面 URL、浏览器信息）。
+        也可调用 <code className="font-mono text-xs">LogPulse.captureError(err)</code> 手动上报。
+      </p>
+      <pre className="overflow-x-auto rounded bg-zinc-900 p-3 font-mono text-xs text-zinc-100">{snippet}</pre>
+    </Card>
   )
 }

@@ -11,7 +11,15 @@
 
 ## 功能
 
-- **多格式自动解析**：JSON 行日志、Nginx/Apache combined 访问日志、RFC3164 Syslog、`时间戳 级别 [服务] 消息` 类文本日志，无法识别的行按纯文本处理并根据关键词推断级别。
+- **多格式自动解析**：
+  - JSON 行日志（含 Go slog JSON、zap 生产配置、前端上报的错误）
+  - logfmt（Go slog TextHandler、logrus 等 `key=value` 格式）
+  - Go 标准库 `log`（`2006/01/02 15:04:05`，含 `main.go:42:` 调用位置）、zap console 格式
+  - Nginx/Apache combined 访问日志、RFC3164 Syslog、`时间戳 级别 [服务] 消息` 类文本日志
+  - 无法识别的行按纯文本处理，根据关键词与异常类型（`TypeError`、`NullPointerException`、`Uncaught` 等）推断级别
+  - Go 生态习惯把错误放在 `error`/`err` 字段，这类字段会并入消息（如 `request failed: EOF`），以便按具体错误聚类
+- **多行异常堆栈合并**：Go `panic` / `fatal error` 的完整 traceback、JS / Node / Java 的 `at ...` 堆栈与 `Caused by:` 会合并为一条日志；堆栈存入 `attributes.stack`，并自动提取出错代码位置 `attributes.error_location`（跳过 Go runtime 帧和浏览器内置函数帧）。没有时间戳的记录（如 panic 输出）沿用上一条日志的时间，并标记 `timestamp_inferred`。
+- **前端错误采集**：提供浏览器采集脚本，自动上报未处理异常、未处理的 Promise 拒绝、资源加载失败，详见下文。
 - **日志模式聚类**：把消息中的可变部分（数字、IP、UUID、十六进制 ID、URL、时间、路径参数、引号字符串等）替换为占位符，得到模板；相同 `(服务, 级别, 模板)` 归为一类。几十万行日志通常只有几十种模式。
   - 例：`payment gateway timeout after 3333ms for order 73554` → `payment gateway timeout after <NUM> for order <NUM>`
 - **异常检测**（后台每分钟一次，导入后也会立即触发）：
@@ -62,6 +70,26 @@ docker compose up -d --build
   - 系统提示词明确要求把日志内容当作数据而非指令，降低日志中被注入恶意指令的风险。
   - 启用了服务端备用模型（`fallbacks: "default"`）：请求若被模型的安全策略拒绝，会自动改用推荐的备用模型重试。
 - **失败处理**：限流、5xx、网络错误等临时性错误不记录，下一轮自动重试；认证失败、被拒绝等错误会记录在 `ai_error` 中并显示在页面上，不再自动重试（可手动重新分析）。
+
+## 采集前端错误
+
+在网页 `<head>` 中尽量靠前的位置加入（导入日志页面里有可直接复制的代码）：
+
+```html
+<script src="https://logpulse.example.com/logpulse-browser.js"
+        data-endpoint="https://logpulse.example.com/api/logs"
+        data-service="web-frontend"
+        data-release="1.0.0"></script>
+```
+
+- 自动捕获未处理的 JS 异常、未处理的 Promise 拒绝、`<script>`/`<img>`/`<link>` 资源加载失败；加 `data-capture-console="true"` 可同时捕获 `console.error`。
+- 每条记录包含错误类型与消息、堆栈、出错位置、页面 URL、浏览器 UA、版本号（`release`）。
+- 手动上报：`LogPulse.captureError(err, { order_id: 42 })`、`LogPulse.log('warn', 'checkout slow', { ms: 3200 })`。
+- 也可以用 `LogPulse.init({ endpoint, service, release, captureConsole, sampleRate, maxPerMinute, beforeSend })` 手动初始化；`beforeSend(event)` 可用于脱敏或过滤，返回 `null` 丢弃该条。
+- 对页面影响很小：批量发送（5 秒或 20 条一批），页面关闭时用 `sendBeacon` 发送剩余数据；同一错误 10 秒内只报一次，默认每分钟最多 30 条；上报失败时静默丢弃。
+- 以 `text/plain` 发送每行一个 JSON，属于跨域"简单请求"，无需预检；后端默认 `ALLOWED_ORIGIN=*`。
+
+> ⚠️ 上报接口目前**没有鉴权**，任何能访问到它的人都可以写入日志。注意 `ALLOWED_ORIGIN` 只限制浏览器能否读取响应，并不能阻止跨域写入。对公网开放前，建议在网关层对 `/api/logs` 限流并限制请求体大小，或只把这个接口暴露给公网、其余接口放在内网。
 
 ## 导入日志
 

@@ -7,3 +7,6 @@
 
 html, body, #root { height: 100%; }
 body { @apply bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100; }
+
+/* 代码与日志按原样显示，不启用字体连字（避免 "<!--"、"=>" 等被渲染成箭头） */
+pre, code, .font-mono { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }

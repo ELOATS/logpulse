@@ -189,20 +189,43 @@ func (s *Server) ingestReader(w http.ResponseWriter, r *http.Request, p *parser.
 		batch = batch[:0]
 		return nil
 	}
-	for sc.Scan() {
-		if e, ok := p.ParseLine(sc.Text()); ok {
+	// 多行合并：异常堆栈（Go panic、JS/Java "at ..."）并入首行，作为一条日志
+	joiner := parser.NewJoiner()
+	var lastTS time.Time
+	add := func(rec string) error {
+		if e, ok := p.ParseRecord(rec); ok {
+			// 没有时间戳的记录（如 Go panic 输出、原始 JS 堆栈）沿用上一条日志的时间，
+			// 否则会被记成导入时刻，打乱异常检测的时间线
+			if e.NoTimestamp && !lastTS.IsZero() {
+				e.Timestamp = lastTS
+				e.Attributes["timestamp_inferred"] = true
+			} else if !e.NoTimestamp {
+				lastTS = e.Timestamp
+			}
 			batch = append(batch, e)
 			if len(batch) >= ingestBatchSize {
-				if err := flush(); err != nil {
-					s.serverError(w, err)
-					return
-				}
+				return flush()
+			}
+		}
+		return nil
+	}
+	for sc.Scan() {
+		if rec, ok := joiner.Push(sc.Text()); ok {
+			if err := add(rec); err != nil {
+				s.serverError(w, err)
+				return
 			}
 		}
 	}
 	if err := sc.Err(); err != nil {
 		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
 		return
+	}
+	if rec, ok := joiner.Flush(); ok {
+		if err := add(rec); err != nil {
+			s.serverError(w, err)
+			return
+		}
 	}
 	if err := flush(); err != nil {
 		s.serverError(w, err)

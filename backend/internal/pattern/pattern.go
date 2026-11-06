@@ -57,6 +57,10 @@ func Template(msg string) string {
 			})
 			continue
 		}
+		if r.repl == `'<STR>'` {
+			t = r.re.ReplaceAllStringFunc(t, keepIdentifier)
+			continue
+		}
 		if r.repl == "<PATH>" {
 			t = r.re.ReplaceAllStringFunc(t, normalizePath)
 			continue
@@ -71,6 +75,17 @@ func Template(msg string) string {
 }
 
 var digitSeg = regexp.MustCompile(`^\d+$`)
+
+var identRe = regexp.MustCompile(`^'[A-Za-z_$][A-Za-z_$.-]{0,40}'$`)
+
+// keepIdentifier 保留单引号中的短标识符（如 JS 的 reading 'map'），它们通常是错误的关键信息；
+// 其余单引号字符串替换为占位符。
+func keepIdentifier(s string) string {
+	if identRe.MatchString(s) {
+		return s
+	}
+	return `'<STR>'`
+}
 
 // normalizePath 只替换路径中纯数字的片段，如 /users/123/orders -> /users/<NUM>/orders
 func normalizePath(p string) string {

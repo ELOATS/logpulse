@@ -127,7 +127,7 @@ function LogRowView({ row }: { row: LogRow }) {
               {row.host && (<><dt className="text-zinc-500">主机</dt><dd>{row.host}</dd></>)}
               {row.pattern_id && (<><dt className="text-zinc-500">模式</dt><dd><Link className="text-indigo-600 hover:underline dark:text-indigo-400" to={`/logs?pattern_id=${row.pattern_id}`}>#{row.pattern_id}（查看同类日志）</Link></dd></>)}
               {attrs.map(([k, v]) => (
-                <div key={k} className="contents"><dt className="font-mono text-zinc-500">{k}</dt><dd className="font-mono break-all">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</dd></div>
+                <div key={k} className="contents"><dt className="font-mono text-zinc-500">{k}</dt><dd className={`font-mono break-all ${typeof v === 'string' && v.includes('\n') ? 'max-h-64 overflow-y-auto whitespace-pre-wrap' : ''}`}>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</dd></div>
               ))}
             </dl>
             <pre className="mt-3 rounded bg-zinc-900 p-3 break-all whitespace-pre-wrap text-zinc-100">{row.raw}</pre>

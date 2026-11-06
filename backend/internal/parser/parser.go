@@ -22,6 +22,9 @@ type Entry struct {
 	Raw        string         `json:"raw"`
 	Format     string         `json:"format"`
 	Attributes map[string]any `json:"attributes"`
+
+	// NoTimestamp 表示原始日志没有时间戳，Timestamp 使用的是解析时刻
+	NoTimestamp bool `json:"-"`
 }
 
 // Parser 持有解析时的默认值。
@@ -37,9 +40,12 @@ func New(defaultService string) *Parser {
 var (
 	combinedRe = regexp.MustCompile(`^(\S+) \S+ (\S+) \[([^\]]+)\] "([^"]*)" (\d{3}) (\d+|-)(?: "([^"]*)" "([^"]*)")?`)
 	syslogRe   = regexp.MustCompile(`^(?:<\d+>)?([A-Z][a-z]{2}\s+\d{1,2} \d{2}:\d{2}:\d{2}) (\S+) ([^:\[\s]+)(?:\[(\d+)\])?: (.*)$`)
-	genericTS  = regexp.MustCompile(`^\[?(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\]?\s+`)
+	genericTS  = regexp.MustCompile(`^\[?(\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\]?\s+`)
 	levelRe    = regexp.MustCompile(`(?i)^\[?(TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|ERR|FATAL|CRITICAL|CRIT|PANIC|SEVERE)\]?:?\s+`)
 	serviceRe  = regexp.MustCompile(`^\[([\w.\-/]+)\]:?\s+`)
+	callerRe   = regexp.MustCompile(`^([\w.\-/]+\.go:\d+):?\s+`) // Go 调用位置，如 main.go:42: 或 svc/main.go:42<TAB>
+	errTypeRe  = regexp.MustCompile(`\b(?:Uncaught|Unhandled)\b|\b[A-Z][A-Za-z]*(?:Error|Exception)\b`)
+	logfmtRe   = regexp.MustCompile(`^[\w.@-]+=`)
 	keywordRe  = regexp.MustCompile(`(?i)\b(fatal|panic|critical|error|exception|failed|failure|warn|warning|timeout|refused|denied)\b`)
 )
 
@@ -52,6 +58,7 @@ var timeLayouts = []string{
 	"2006-01-02T15:04:05.999999999",
 	"2006-01-02 15:04:05",
 	"2006-01-02T15:04:05",
+	"2006/01/02 15:04:05.999999999", // Go 标准库 log
 	"02/Jan/2006:15:04:05 -0700",
 	time.RFC1123Z,
 	time.RFC1123,
@@ -65,6 +72,15 @@ func (p *Parser) ParseLine(line string) (Entry, bool) {
 	}
 	var e Entry
 	switch {
+	case strings.HasPrefix(line, "panic: ") || strings.HasPrefix(line, "fatal error: "):
+		e = Entry{Level: "FATAL", Message: line, Format: "go-panic"}
+	case logfmtRe.MatchString(line):
+		if m, ok := parseLogfmt(line); ok {
+			e = p.fromMap(m)
+			e.Format = "logfmt"
+			break
+		}
+		e = p.parseText(line)
 	case strings.HasPrefix(strings.TrimSpace(line), "{"):
 		if ent, ok := p.parseJSON(line); ok {
 			e = ent
@@ -83,6 +99,7 @@ func (p *Parser) ParseLine(line string) (Entry, bool) {
 	e.Raw = line
 	if e.Timestamp.IsZero() {
 		e.Timestamp = p.Now()
+		e.NoTimestamp = true
 	}
 	if e.Service == "" {
 		e.Service = p.DefaultService
@@ -146,6 +163,14 @@ func (p *Parser) fromMap(m map[string]any) Entry {
 	if v, ok := take("message", "msg", "log", "text", "event"); ok {
 		e.Message = fmt.Sprint(v)
 	}
+	// Go 生态（zap/slog/logrus）习惯把错误放在 error/err 字段，并入消息才能按具体错误聚类
+	for _, k := range []string{"error", "err"} {
+		if v, ok := m[k].(string); ok && v != "" {
+			used[k] = true
+			e.Message = joinError(e.Message, v)
+			break
+		}
+	}
 	if v, ok := take("service", "app", "application", "logger", "component", "service.name"); ok {
 		e.Service = fmt.Sprint(v)
 	}
@@ -161,7 +186,77 @@ func (p *Parser) fromMap(m map[string]any) Entry {
 		b, _ := json.Marshal(e.Attributes)
 		e.Message = string(b)
 	}
+	for _, k := range []string{"stack", "stacktrace", "stack_trace", "error.stack"} {
+		if st, ok := e.Attributes[k].(string); ok {
+			if loc := StackLocation(st); loc != "" {
+				e.Attributes["error_location"] = loc
+			}
+			break
+		}
+	}
 	return e
+}
+
+func joinError(msg, errText string) string {
+	switch {
+	case msg == "":
+		return errText
+	case strings.Contains(msg, errText):
+		return msg
+	}
+	return msg + ": " + errText
+}
+
+// parseLogfmt 解析 key=value 格式（Go slog TextHandler、logrus 等），值可带引号与转义。
+// 出现不带 "=" 的单词时认为不是 logfmt。
+func parseLogfmt(line string) (map[string]any, bool) {
+	m := map[string]any{}
+	i, n := 0, len(line)
+	for i < n {
+		for i < n && line[i] == ' ' {
+			i++
+		}
+		if i >= n {
+			break
+		}
+		start := i
+		for i < n && line[i] != '=' && line[i] != ' ' {
+			i++
+		}
+		if i >= n || line[i] != '=' || i == start {
+			return nil, false
+		}
+		key := line[start:i]
+		i++
+		if i < n && line[i] == '"' {
+			j := i + 1
+			for j < n && line[j] != '"' {
+				if line[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if j >= n {
+				return nil, false
+			}
+			quoted := line[i : j+1]
+			if v, err := strconv.Unquote(quoted); err == nil {
+				m[key] = v
+			} else {
+				m[key] = quoted[1 : len(quoted)-1]
+			}
+			i = j + 1
+		} else {
+			start := i
+			for i < n && line[i] != ' ' {
+				i++
+			}
+			m[key] = line[start:i]
+		}
+	}
+	_, hasMsg := m["msg"]
+	_, hasLevel := m["level"]
+	return m, len(m) >= 2 && (hasMsg || hasLevel)
 }
 
 func (p *Parser) parseCombined(line string) (Entry, bool) {
@@ -261,8 +356,33 @@ func (p *Parser) parseText(line string) Entry {
 			rest = rest[len(m[0]):]
 		}
 	}
+	if m := callerRe.FindStringSubmatch(rest); m != nil {
+		e.Attributes["caller"] = m[1]
+		rest = rest[len(m[0]):]
+	}
 	e.Message = strings.TrimSpace(rest)
+	mergeTrailingJSON(&e)
 	return e
+}
+
+// mergeTrailingJSON 处理 zap console 格式末尾的 "<TAB>{...}" 字段。
+func mergeTrailingJSON(e *Entry) {
+	idx := strings.LastIndex(e.Message, "\t{")
+	if idx < 0 || !strings.HasSuffix(e.Message, "}") {
+		return
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(e.Message[idx+1:]), &fields); err != nil {
+		return
+	}
+	e.Message = strings.TrimSpace(e.Message[:idx])
+	for k, v := range fields {
+		if s, ok := v.(string); ok && (k == "error" || k == "err") && s != "" {
+			e.Message = joinError(e.Message, s)
+			continue
+		}
+		e.Attributes[k] = v
+	}
 }
 
 // NormalizeLevel 将各种级别写法归一为 DEBUG/INFO/WARN/ERROR/FATAL。
@@ -283,13 +403,15 @@ func NormalizeLevel(s string) string {
 }
 
 func guessLevel(msg string) string {
-	m := keywordRe.FindString(msg)
-	switch strings.ToLower(m) {
-	case "fatal", "panic", "critical":
+	kw := strings.ToLower(keywordRe.FindString(msg))
+	switch {
+	case kw == "fatal" || kw == "panic" || kw == "critical":
 		return "FATAL"
-	case "error", "exception", "failed", "failure", "refused", "denied":
+	case errTypeRe.MatchString(msg): // TypeError、NullPointerException、Uncaught ... 等
 		return "ERROR"
-	case "warn", "warning", "timeout":
+	case kw == "error" || kw == "exception" || kw == "failed" || kw == "failure" || kw == "refused" || kw == "denied":
+		return "ERROR"
+	case kw == "warn" || kw == "warning" || kw == "timeout":
 		return "WARN"
 	}
 	return "INFO"

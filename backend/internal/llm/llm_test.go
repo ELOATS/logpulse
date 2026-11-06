@@ -154,3 +154,16 @@ func TestDiverseSample(t *testing.T) {
 		t.Errorf("sample should include rare pattern and span the window: %+v", got)
 	}
 }
+
+func TestWriteStackPrefersMostSevere(t *testing.T) {
+	rows := []store.LogRow{
+		{Level: "ERROR", Message: "request failed: EOF", Attributes: json.RawMessage(`{"stacktrace":"main.main\n\t/app/main.go:42"}`)},
+		{Level: "FATAL", Message: "panic: nil pointer", Attributes: json.RawMessage(`{"stack":"goroutine 1 [running]:\nmain.Pay()\n\t/app/handler.go:42"}`)},
+		{Level: "ERROR", Message: "no stack", Attributes: json.RawMessage(`{}`)},
+	}
+	var b strings.Builder
+	writeStack(&b, rows)
+	if !strings.Contains(b.String(), "panic: nil pointer") || !strings.Contains(b.String(), "handler.go:42") {
+		t.Fatalf("expected FATAL panic stack, got:\n%s", b.String())
+	}
+}
