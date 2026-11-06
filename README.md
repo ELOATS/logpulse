@@ -151,6 +151,7 @@ JSON 字段会自动识别：时间（`timestamp`/`time`/`ts`/`@timestamp`，支
 | `ANALYZE_BASELINE_BUCKETS` | `60` | 基线窗口桶数 |
 | `ANALYZE_Z_THRESHOLD` | `5` | 等效 z 值阈值（≥2 倍为高危，≥1.5 倍为中危）。在模拟评估中，每条序列每天误报 ≤ 0.1 次 |
 | `ANALYZE_MIN_COUNT` | `5` | 单桶计数低于该值不告警，避免低流量噪声 |
+| `LOG_RETENTION_DAYS` | `0`（docker compose 中为 `30`） | 日志保留天数，启动时及之后每小时清理一次；0 表示不清理 |
 | `ANTHROPIC_API_KEY` | 空 | 设置后启用 AI 异常分析 |
 | `LLM_MODEL` | `claude-opus-5-5` | 使用的 Claude 模型 |
 | `LLM_EFFORT` | `medium` | 推理强度：`low` / `medium` / `high` / `xhigh` / `max`，越高越细致但更慢、更贵 |
@@ -183,9 +184,14 @@ docker-compose.yml
 ## 数据模型
 
 - `log_patterns`：模式（模板、样例、计数、首次/最近出现时间），`hash` 唯一。
-- `logs`：日志明细，`pattern_id` 关联模式；`search` 为生成列 `tsvector`，配合 GIN 索引做全文检索；`attributes` 为 JSONB。
+- `logs`：日志明细，按天（UTC）分区（`logs_pYYYYMMDD`），写入时按需自动建分区；`pattern_id` 关联模式；`search` 为生成列 `tsvector`，配合 GIN 索引做全文检索；`attributes` 为 JSONB。
 - `log_counts`：按 (分钟, 服务, 级别) 预聚合的计数，写入日志时在同一事务中累加。总览、趋势图和异常检测读取此表，耗时只与时间范围内的分钟数有关，不随日志总量增长；首尾不足一分钟的部分读原始日志，结果与直接统计完全一致。
 - `anomalies`：异常事件，`dedup_key` 保证重复分析幂等；`ai_insight`（JSONB）、`ai_model`、`ai_error`、`ai_generated_at` 保存 AI 分析结果。
+
+## 数据保留与升级说明
+
+- 设置 `LOG_RETENTION_DAYS=N` 后，早于 N 天的**整天**数据会被清理：删除对应分区，并清理同期的分钟计数、已没有任何日志的模式及其异常。以天为粒度，因此实际保留 N 到 N+1 天。删除分区耗时与数据量基本无关（实测删除约 90 万行的两个分区连同服务启动不到 0.6 秒），磁盘空间立即释放。
+- **从未分区的旧版本升级**时，第 5 个迁移会把已有日志复制到分区表并重建索引，期间服务不可用。实测在 4 核机器上 259 万行约需 80 秒（约每百万行 30 秒），升级大库前请预留停机时间。
 
 ## 后续可扩展方向
 

@@ -19,7 +19,10 @@ import (
 //	LOGPULSE_TEST_DATABASE_URL=postgres://user:pass@localhost:5432/db?sslmode=disable go test ./internal/store
 //
 // 每次运行在独立的临时 schema 中建表，结束后删除。
-func testStore(t *testing.T) *Store {
+func testStore(t *testing.T) *Store { return testStoreAt(t, "") }
+
+// testStoreAt 在临时 schema 中执行到指定迁移版本（空表示全部）。
+func testStoreAt(t *testing.T, migration string) *Store {
 	url := os.Getenv("LOGPULSE_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("未设置 LOGPULSE_TEST_DATABASE_URL，跳过数据库集成测试")
@@ -44,7 +47,7 @@ func testStore(t *testing.T) *Store {
 		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
 		admin.Close()
 	})
-	if err := db.Migrate(ctx, pool); err != nil {
+	if err := db.MigrateTo(ctx, pool, migration); err != nil {
 		t.Fatal(err)
 	}
 	return New(pool)

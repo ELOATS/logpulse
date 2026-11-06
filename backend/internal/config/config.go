@@ -20,6 +20,9 @@ type Config struct {
 	AnalyzeLookback time.Duration // 每次分析回溯的时间范围
 
 	// 大模型异常摘要（设置 ANTHROPIC_API_KEY 后启用）
+	// 数据保留：删除早于 N 天的日志分区，0 表示不清理
+	RetentionDays int
+
 	LLMEnabled       bool
 	LLMModel         string
 	LLMEffort        string // low | medium | high | xhigh | max
@@ -41,6 +44,7 @@ func Load() Config {
 		MinCount:        envInt("ANALYZE_MIN_COUNT", 5),
 		AnalyzeLookback: envDuration("ANALYZE_LOOKBACK", 24*time.Hour),
 
+		RetentionDays:    envInt("LOG_RETENTION_DAYS", 0),
 		LLMEnabled:       os.Getenv("ANTHROPIC_API_KEY") != "" && env("LLM_ENABLED", "true") != "false",
 		LLMModel:         env("LLM_MODEL", "claude-opus-5-5"),
 		LLMEffort:        env("LLM_EFFORT", "medium"),

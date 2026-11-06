@@ -56,6 +56,9 @@ func main() {
 		log.Info("ai insight enabled", "model", cfg.LLMModel, "effort", cfg.LLMEffort, "auto", cfg.LLMAutoSummarize)
 	}
 	go an.Loop(ctx, cfg.AnalyzeInterval)
+	if cfg.RetentionDays > 0 {
+		go retentionLoop(ctx, st, cfg.RetentionDays, log)
+	}
 
 	srv := &http.Server{
 		Addr: cfg.Addr,
@@ -78,4 +81,30 @@ func main() {
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
 	log.Info("server stopped")
+}
+
+// retentionLoop 启动时及之后每小时清理一次超出保留期的数据。
+func retentionLoop(ctx context.Context, st *store.Store, days int, log *slog.Logger) {
+	run := func() {
+		res, err := st.ApplyRetention(ctx, time.Now().AddDate(0, 0, -days))
+		if err != nil {
+			log.Error("retention failed", "err", err)
+			return
+		}
+		if len(res.DroppedPartitions) > 0 || res.DeletedPatterns > 0 {
+			log.Info("retention applied", "keep_days", days, "dropped", res.DroppedPartitions,
+				"patterns", res.DeletedPatterns, "anomalies", res.DeletedAnomalies)
+		}
+	}
+	run()
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			run()
+		}
+	}
 }

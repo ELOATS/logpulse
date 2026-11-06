@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"path"
 	"sort"
 	"time"
 
@@ -41,7 +42,10 @@ func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 }
 
 // Migrate 按文件名顺序执行尚未执行过的迁移。
-func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+func Migrate(ctx context.Context, pool *pgxpool.Pool) error { return MigrateTo(ctx, pool, "") }
+
+// MigrateTo 执行到指定版本（文件名前缀，如 "004"）为止；last 为空表示全部。供测试旧版本升级路径使用。
+func MigrateTo(ctx context.Context, pool *pgxpool.Pool, last string) error {
 	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version TEXT PRIMARY KEY,
 		applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
@@ -53,6 +57,9 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if last != "" && path.Base(name) > last+"\xff" {
+			break
+		}
 		var exists bool
 		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)`, name).Scan(&exists); err != nil {
 			return err

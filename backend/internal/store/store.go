@@ -15,7 +15,8 @@ import (
 )
 
 type Store struct {
-	Pool *pgxpool.Pool
+	Pool  *pgxpool.Pool
+	parts partitionCache
 }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{Pool: pool} }
@@ -58,6 +59,14 @@ func (s *Store) Ingest(ctx context.Context, entries []parser.Entry) (IngestResul
 		if e.Timestamp.After(a.last) {
 			a.last = e.Timestamp
 		}
+	}
+
+	times := make([]time.Time, len(entries))
+	for i, e := range entries {
+		times[i] = e.Timestamp
+	}
+	if err := s.ensurePartitions(ctx, times); err != nil {
+		return IngestResult{}, err
 	}
 
 	tx, err := s.Pool.Begin(ctx)

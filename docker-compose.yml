@@ -20,6 +20,8 @@ services:
     environment:
       DATABASE_URL: postgres://loganalyzer:loganalyzer@postgres:5432/loganalyzer?sslmode=disable
       ANALYZE_INTERVAL: 1m
+      # 日志保留天数（按天删除整个分区），0 表示不清理
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-30}
       # 设置后启用 AI 异常分析（读取宿主机环境变量或 .env 文件）
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-claude-opus-5-5}
