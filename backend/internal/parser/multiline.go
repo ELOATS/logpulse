@@ -1,9 +1,15 @@
 package parser
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/eloats/logpulse/backend/internal/textutil"
 )
 
 // Joiner 把逐行读入的日志合并为完整记录：异常堆栈的后续行会并入其首行。
@@ -40,7 +46,7 @@ func (j *Joiner) Push(line string) (string, bool) {
 	rec, ok := j.Flush()
 	if strings.TrimSpace(line) != "" {
 		j.lines = append(j.lines, line)
-		j.inTrace = strings.HasPrefix(line, "panic: ") || strings.HasPrefix(line, "fatal error: ")
+		j.inTrace = isGoPanic(line)
 	}
 	return rec, ok
 }
@@ -86,7 +92,8 @@ func (p *Parser) ParseRecord(rec string) (Entry, bool) {
 	if !ok || !multi {
 		return e, ok
 	}
-	e.Raw = rec
+	rest = textutil.Clean(rest)
+	e.Raw = textutil.Clean(rec)
 	e.Attributes["stack"] = rest
 	if loc := StackLocation(rest); loc != "" {
 		e.Attributes["error_location"] = loc
@@ -144,3 +151,43 @@ func StackLocation(stack string) string {
 }
 
 func looksLikeStack(s string) bool { return stackHintRe.MatchString(s) }
+
+// ErrRead 包装读取输入时的错误（如请求体超出大小限制），与处理条目时的错误区分开。
+var ErrRead = errors.New("read input")
+
+// ParseStream 逐行读取 r，合并多行异常堆栈，解析后依次交给 emit。
+// 没有时间戳的记录（如 Go panic 输出、原始 JS 堆栈）沿用上一条记录的时间，
+// 并标记 attributes.timestamp_inferred；否则它们会被记成解析时刻，打乱时间线。
+func (p *Parser) ParseStream(r io.Reader, emit func(Entry) error) error {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	joiner := NewJoiner()
+	var last time.Time
+	handle := func(rec string) error {
+		e, ok := p.ParseRecord(rec)
+		if !ok {
+			return nil
+		}
+		if !e.NoTimestamp {
+			last = e.Timestamp
+		} else if !last.IsZero() {
+			e.Timestamp = last
+			e.Attributes["timestamp_inferred"] = true
+		}
+		return emit(e)
+	}
+	for sc.Scan() {
+		if rec, ok := joiner.Push(sc.Text()); ok {
+			if err := handle(rec); err != nil {
+				return err
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("%w: %w", ErrRead, err)
+	}
+	if rec, ok := joiner.Flush(); ok {
+		return handle(rec)
+	}
+	return nil
+}

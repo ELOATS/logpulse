@@ -13,7 +13,9 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/v2"
 	"github.com/anthropics/anthropic-sdk-go/v2/option"
 	"github.com/anthropics/anthropic-sdk-go/v2/shared/constant"
+	"github.com/eloats/logpulse/backend/internal/parser"
 	"github.com/eloats/logpulse/backend/internal/store"
+	"github.com/eloats/logpulse/backend/internal/textutil"
 )
 
 // Insight 是模型返回的结构化分析结果（由 Structured Outputs 保证符合该结构）。
@@ -136,7 +138,7 @@ func BuildPrompt(in Input) string {
 	a := in.Anomaly
 	var b strings.Builder
 	b.WriteString("<anomaly>\n")
-	fmt.Fprintf(&b, "类型: %s (%s)\n严重级别: %s\n服务: %s\n", kindNames[a.Kind], a.Kind, a.Severity, orUnnamed(a.Service))
+	fmt.Fprintf(&b, "类型: %s (%s)\n严重级别: %s\n服务: %s\n", kindNames[a.Kind], a.Kind, a.Severity, parser.DisplayService(a.Service))
 	fmt.Fprintf(&b, "时间窗口: %s ~ %s (UTC)\n", a.WindowStart.UTC().Format(time.RFC3339), a.WindowEnd.UTC().Format(time.RFC3339))
 	if a.Kind != "new_pattern" {
 		fmt.Fprintf(&b, "观测值: %.0f 条，基线: %.1f 条，峰值 z-score: %.1f\n", a.Observed, a.Expected, a.Score)
@@ -204,7 +206,7 @@ func writeStack(b *strings.Builder, rows []store.LogRow) {
 	var bestStack string
 	for i := range rows {
 		r := &rows[i]
-		for _, k := range []string{"stack", "stacktrace", "stack_trace", "error.stack"} {
+		for _, k := range parser.StackKeys {
 			if st := attrString(r.Attributes, k); st != "" {
 				if best == nil || levelRank[r.Level] > levelRank[best.Level] {
 					best, bestStack = r, st
@@ -248,16 +250,10 @@ func Redact(s string) string {
 	return s
 }
 
+// truncate 截断到不超过 n 字节（不切开多字节字符），被截断时加省略号。
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
-}
-
-func orUnnamed(s string) string {
-	if s == "" {
-		return "(未命名)"
-	}
-	return s
+	return textutil.Truncate(s, n) + "…"
 }

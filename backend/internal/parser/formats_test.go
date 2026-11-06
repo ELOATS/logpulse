@@ -1,9 +1,11 @@
 package parser
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 var ts20240501 = time.Date(2024, 5, 1, 10, 0, 0, 0, time.UTC)
@@ -170,5 +172,45 @@ func TestStackLocationSkipsNativeFrames(t *testing.T) {
 	}
 	if got := StackLocation("Error\n    at JSON.parse (<anonymous>)"); got != "JSON.parse (<anonymous>)" {
 		t.Errorf("only native frame should still be returned, got %q", got)
+	}
+}
+
+func TestParseStreamInfersTimestamps(t *testing.T) {
+	input := "2024-05-01 10:00:00 INFO [api] start\npanic: boom\n\ngoroutine 1 [running]:\nmain.main()\n\t/app/main.go:9 +0x1\n2024-05-01 10:00:05 INFO [api] restarted"
+	var got []Entry
+	if err := newTestParser().ParseStream(strings.NewReader(input), func(e Entry) error { got = append(got, e); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("records = %d, want 3", len(got))
+	}
+	panicEntry := got[1]
+	if !panicEntry.Timestamp.Equal(time.Date(2024, 5, 1, 10, 0, 0, 0, time.UTC)) || panicEntry.Attributes["timestamp_inferred"] != true {
+		t.Errorf("panic should inherit previous timestamp: %v %v", panicEntry.Timestamp, panicEntry.Attributes)
+	}
+	if _, inferred := got[2].Attributes["timestamp_inferred"]; inferred {
+		t.Error("records with their own timestamp must not be marked inferred")
+	}
+}
+
+func TestParseStreamWrapsReadErrors(t *testing.T) {
+	err := newTestParser().ParseStream(errReader{}, func(Entry) error { return nil })
+	if !errors.Is(err, ErrRead) {
+		t.Fatalf("want ErrRead, got %v", err)
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("boom") }
+
+func TestCleansInvalidText(t *testing.T) {
+	e, _ := newTestParser().ParseLine("ERROR bad \xff byte and nul\x00 here")
+	if e.Message != "bad � byte and nul here" || !utf8.ValidString(e.Raw) || strings.Contains(e.Raw, "\x00") {
+		t.Fatalf("not cleaned: %q / %q", e.Message, e.Raw)
+	}
+	j, _ := newTestParser().ParseLine(`{"msg":"ok","detail":"a\u0000b"}`)
+	if j.Attributes["detail"] != "ab" {
+		t.Fatalf("attribute not cleaned: %#v", j.Attributes)
 	}
 }

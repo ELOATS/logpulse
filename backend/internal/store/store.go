@@ -10,6 +10,7 @@ import (
 
 	"github.com/eloats/logpulse/backend/internal/parser"
 	"github.com/eloats/logpulse/backend/internal/pattern"
+	"github.com/eloats/logpulse/backend/internal/textutil"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -48,7 +49,7 @@ func (s *Store) Ingest(ctx context.Context, entries []parser.Entry) (IngestResul
 		hashes[i] = h
 		a, ok := aggs[h]
 		if !ok {
-			a = &patternAgg{service: e.Service, level: e.Level, template: tpl, sample: truncate(e.Message, 1000), first: e.Timestamp, last: e.Timestamp}
+			a = &patternAgg{service: e.Service, level: e.Level, template: tpl, sample: textutil.Truncate(e.Message, 1000), first: e.Timestamp, last: e.Timestamp}
 			aggs[h] = a
 			order = append(order, h)
 		}
@@ -126,13 +127,6 @@ func (s *Store) Ingest(ctx context.Context, entries []parser.Entry) (IngestResul
 		return IngestResult{}, fmt.Errorf("copy logs: %w", err)
 	}
 	return res, tx.Commit(ctx)
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }
 
 // ---------- 查询日志 ----------

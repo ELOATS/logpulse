@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/eloats/logpulse/backend/internal/textutil"
 )
 
 // Entry 是一条结构化日志。
@@ -64,43 +66,84 @@ var timeLayouts = []string{
 	time.RFC1123,
 }
 
+// 级别分组（取值均为 NormalizeLevel 的输出）。
+var (
+	ErrorLevels = []string{"ERROR", "FATAL"}         // 视为"错误"
+	AlertLevels = []string{"WARN", "ERROR", "FATAL"} // 告警及以上
+)
+
+// IsError 判断级别是否属于 ErrorLevels。
+func IsError(level string) bool { return level == "ERROR" || level == "FATAL" }
+
+// StackKeys 是常见日志库存放异常堆栈的字段名（按优先级）。
+var StackKeys = []string{"stack", "stacktrace", "stack_trace", "error.stack"}
+
+// DisplayService 返回用于展示的服务名，空服务名显示为"(未命名)"。
+func DisplayService(s string) string {
+	if s == "" {
+		return "(未命名)"
+	}
+	return s
+}
+
+// isGoPanic 判断一行是否是 Go 运行时 panic / fatal error 输出的首行。
+func isGoPanic(line string) bool {
+	return strings.HasPrefix(line, "panic: ") || strings.HasPrefix(line, "fatal error: ")
+}
+
 // ParseLine 解析单行日志，空行返回 ok=false。
 func (p *Parser) ParseLine(line string) (Entry, bool) {
 	line = strings.TrimRight(line, "\r\n")
 	if strings.TrimSpace(line) == "" {
 		return Entry{}, false
 	}
-	var e Entry
-	switch {
-	case strings.HasPrefix(line, "panic: ") || strings.HasPrefix(line, "fatal error: "):
-		e = Entry{Level: "FATAL", Message: line, Format: "go-panic"}
-	case logfmtRe.MatchString(line):
-		if m, ok := parseLogfmt(line); ok {
-			e = p.fromMap(m)
-			e.Format = "logfmt"
-			break
-		}
+	e, ok := p.detect(line)
+	if !ok {
 		e = p.parseText(line)
-	case strings.HasPrefix(strings.TrimSpace(line), "{"):
-		if ent, ok := p.parseJSON(line); ok {
-			e = ent
-			break
-		}
-		e = p.parseText(line)
-	default:
-		if ent, ok := p.parseCombined(line); ok {
-			e = ent
-		} else if ent, ok := p.parseSyslog(line); ok {
-			e = ent
-		} else {
-			e = p.parseText(line)
-		}
 	}
 	e.Raw = line
+	p.finalize(&e)
+	return e, true
+}
+
+// detect 尝试识别结构化格式；都不匹配时返回 ok=false，由调用方按通用文本解析。
+func (p *Parser) detect(line string) (Entry, bool) {
+	switch {
+	case isGoPanic(line):
+		return Entry{Level: "FATAL", Message: line, Format: "go-panic"}, true
+	case logfmtRe.MatchString(line):
+		if m, ok := parseLogfmt(line); ok {
+			e := p.fromMap(m)
+			e.Format = "logfmt"
+			return e, true
+		}
+	case strings.HasPrefix(strings.TrimSpace(line), "{"):
+		return p.parseJSON(line)
+	default:
+		if e, ok := p.parseCombined(line); ok {
+			return e, true
+		}
+		return p.parseSyslog(line)
+	}
+	return Entry{}, false
+}
+
+// FromMap 将调用方提交的 JSON 对象转为条目（用于 API 直接推送）。
+func (p *Parser) FromMap(m map[string]any) Entry {
+	raw, _ := json.Marshal(m)
+	e := p.fromMap(m)
+	e.Raw = string(raw)
+	p.finalize(&e)
+	return e
+}
+
+// finalize 补全默认值，并清理 PostgreSQL 不接受的字符。
+func (p *Parser) finalize(e *Entry) {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = p.Now()
 		e.NoTimestamp = true
 	}
+	e.Timestamp = e.Timestamp.UTC()
 	if e.Service == "" {
 		e.Service = p.DefaultService
 	}
@@ -110,26 +153,9 @@ func (p *Parser) ParseLine(line string) (Entry, bool) {
 	if e.Attributes == nil {
 		e.Attributes = map[string]any{}
 	}
-	e.Timestamp = e.Timestamp.UTC()
-	return e, true
-}
-
-// FromMap 将调用方提交的 JSON 对象转为条目（用于 API 直接推送）。
-func (p *Parser) FromMap(m map[string]any) Entry {
-	raw, _ := json.Marshal(m)
-	e := p.fromMap(m)
-	e.Raw = string(raw)
-	if e.Timestamp.IsZero() {
-		e.Timestamp = p.Now()
-	}
-	if e.Service == "" {
-		e.Service = p.DefaultService
-	}
-	if e.Level == "" {
-		e.Level = guessLevel(e.Message)
-	}
-	e.Timestamp = e.Timestamp.UTC()
-	return e
+	e.Message, e.Raw = textutil.Clean(e.Message), textutil.Clean(e.Raw)
+	e.Service, e.Host = textutil.Clean(e.Service), textutil.Clean(e.Host)
+	textutil.CleanValue(e.Attributes)
 }
 
 func (p *Parser) parseJSON(line string) (Entry, bool) {
@@ -163,13 +189,9 @@ func (p *Parser) fromMap(m map[string]any) Entry {
 	if v, ok := take("message", "msg", "log", "text", "event"); ok {
 		e.Message = fmt.Sprint(v)
 	}
-	// Go 生态（zap/slog/logrus）习惯把错误放在 error/err 字段，并入消息才能按具体错误聚类
-	for _, k := range []string{"error", "err"} {
-		if v, ok := m[k].(string); ok && v != "" {
-			used[k] = true
-			e.Message = joinError(e.Message, v)
-			break
-		}
+	if k, v := errorField(m); k != "" {
+		used[k] = true
+		e.Message = joinError(e.Message, v)
 	}
 	if v, ok := take("service", "app", "application", "logger", "component", "service.name"); ok {
 		e.Service = fmt.Sprint(v)
@@ -186,15 +208,31 @@ func (p *Parser) fromMap(m map[string]any) Entry {
 		b, _ := json.Marshal(e.Attributes)
 		e.Message = string(b)
 	}
-	for _, k := range []string{"stack", "stacktrace", "stack_trace", "error.stack"} {
-		if st, ok := e.Attributes[k].(string); ok {
-			if loc := StackLocation(st); loc != "" {
-				e.Attributes["error_location"] = loc
-			}
-			break
-		}
+	if loc := StackLocation(StackOf(e.Attributes)); loc != "" {
+		e.Attributes["error_location"] = loc
 	}
 	return e
+}
+
+// errorField 返回 m 中的错误字段（error 优先于 err）。Go 生态（zap/slog/logrus）
+// 习惯把错误放在这里，并入消息才能按具体错误聚类。
+func errorField(m map[string]any) (key, value string) {
+	for _, k := range []string{"error", "err"} {
+		if v, ok := m[k].(string); ok && v != "" {
+			return k, v
+		}
+	}
+	return "", ""
+}
+
+// StackOf 返回附加字段中的异常堆栈（按 StackKeys 的优先级），没有时返回空串。
+func StackOf(attrs map[string]any) string {
+	for _, k := range StackKeys {
+		if st, ok := attrs[k].(string); ok {
+			return st
+		}
+	}
+	return ""
 }
 
 func joinError(msg, errText string) string {
@@ -376,12 +414,14 @@ func mergeTrailingJSON(e *Entry) {
 		return
 	}
 	e.Message = strings.TrimSpace(e.Message[:idx])
+	errKey, errText := errorField(fields)
+	if errKey != "" {
+		e.Message = joinError(e.Message, errText)
+	}
 	for k, v := range fields {
-		if s, ok := v.(string); ok && (k == "error" || k == "err") && s != "" {
-			e.Message = joinError(e.Message, s)
-			continue
+		if k != errKey {
+			e.Attributes[k] = v
 		}
-		e.Attributes[k] = v
 	}
 }
 

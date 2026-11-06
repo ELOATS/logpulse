@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,4 +201,14 @@ func head(p []TimePoint) []TimePoint {
 		return p[:3]
 	}
 	return p
+}
+
+// 回归：超长消息在截断处切开多字节字符时，曾导致 PostgreSQL 拒绝整批写入。
+func TestIngestLongMultibyteMessage(t *testing.T) {
+	s := testStore(t)
+	msg := strings.Repeat("a", 999) + strings.Repeat("错", 800) // 第 1000、2000 字节都落在字符中间
+	e := parser.Entry{Timestamp: t0, Service: "api", Level: "ERROR", Message: msg, Raw: msg, Format: "plain", Attributes: map[string]any{}}
+	if _, err := s.Ingest(context.Background(), []parser.Entry{e}); err != nil {
+		t.Fatal(err)
+	}
 }

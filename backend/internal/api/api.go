@@ -2,7 +2,7 @@
 package api
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -175,80 +175,66 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) ingestReader(w http.ResponseWriter, r *http.Request, p *parser.Parser, rd io.Reader) {
-	sc := bufio.NewScanner(rd)
-	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	total := store.IngestResult{}
-	batch := make([]parser.Entry, 0, ingestBatchSize)
-	flush := func() error {
-		res, err := s.Store.Ingest(r.Context(), batch)
-		if err != nil {
-			return err
-		}
-		total.Accepted += res.Accepted
-		total.NewPatterns += res.NewPatterns
-		batch = batch[:0]
-		return nil
-	}
-	// 多行合并：异常堆栈（Go panic、JS/Java "at ..."）并入首行，作为一条日志
-	joiner := parser.NewJoiner()
-	var lastTS time.Time
-	add := func(rec string) error {
-		if e, ok := p.ParseRecord(rec); ok {
-			// 没有时间戳的记录（如 Go panic 输出、原始 JS 堆栈）沿用上一条日志的时间，
-			// 否则会被记成导入时刻，打乱异常检测的时间线
-			if e.NoTimestamp && !lastTS.IsZero() {
-				e.Timestamp = lastTS
-				e.Attributes["timestamp_inferred"] = true
-			} else if !e.NoTimestamp {
-				lastTS = e.Timestamp
-			}
-			batch = append(batch, e)
-			if len(batch) >= ingestBatchSize {
-				return flush()
-			}
-		}
-		return nil
-	}
-	for sc.Scan() {
-		if rec, ok := joiner.Push(sc.Text()); ok {
-			if err := add(rec); err != nil {
-				s.serverError(w, err)
-				return
-			}
-		}
-	}
-	if err := sc.Err(); err != nil {
-		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
-		return
-	}
-	if rec, ok := joiner.Flush(); ok {
-		if err := add(rec); err != nil {
-			s.serverError(w, err)
-			return
-		}
-	}
-	if err := flush(); err != nil {
-		s.serverError(w, err)
-		return
-	}
-	s.Analyzer.Trigger()
-	writeJSON(w, http.StatusOK, total)
+	b := &batcher{ctx: r.Context(), store: s.Store}
+	err := p.ParseStream(rd, b.add)
+	s.finishIngest(w, b, err)
 }
 
 func (s *Server) ingestEntries(w http.ResponseWriter, r *http.Request, entries []parser.Entry) {
-	total := store.IngestResult{}
-	for i := 0; i < len(entries); i += ingestBatchSize {
-		end := min(i+ingestBatchSize, len(entries))
-		res, err := s.Store.Ingest(r.Context(), entries[i:end])
-		if err != nil {
-			s.serverError(w, err)
-			return
+	b := &batcher{ctx: r.Context(), store: s.Store}
+	var err error
+	for _, e := range entries {
+		if err = b.add(e); err != nil {
+			break
 		}
-		total.Accepted += res.Accepted
-		total.NewPatterns += res.NewPatterns
 	}
-	s.Analyzer.Trigger()
-	writeJSON(w, http.StatusOK, total)
+	s.finishIngest(w, b, err)
+}
+
+// finishIngest 写入剩余条目、触发异常检测并返回结果。
+func (s *Server) finishIngest(w http.ResponseWriter, b *batcher, err error) {
+	if err == nil {
+		err = b.flush()
+	}
+	switch {
+	case errors.Is(err, parser.ErrRead):
+		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+	case err != nil:
+		s.serverError(w, err)
+	default:
+		s.Analyzer.Trigger()
+		writeJSON(w, http.StatusOK, b.total)
+	}
+}
+
+// batcher 把条目攒成批次写入，并累计写入结果。
+type batcher struct {
+	ctx   context.Context
+	store *store.Store
+	batch []parser.Entry
+	total store.IngestResult
+}
+
+func (b *batcher) add(e parser.Entry) error {
+	b.batch = append(b.batch, e)
+	if len(b.batch) >= ingestBatchSize {
+		return b.flush()
+	}
+	return nil
+}
+
+func (b *batcher) flush() error {
+	if len(b.batch) == 0 {
+		return nil
+	}
+	res, err := b.store.Ingest(b.ctx, b.batch)
+	if err != nil {
+		return err
+	}
+	b.total.Accepted += res.Accepted
+	b.total.NewPatterns += res.NewPatterns
+	b.batch = b.batch[:0]
+	return nil
 }
 
 func (s *Server) searchLogs(w http.ResponseWriter, r *http.Request) {

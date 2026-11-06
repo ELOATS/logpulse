@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/eloats/logpulse/backend/internal/parser"
 	"github.com/eloats/logpulse/backend/internal/store"
 )
 
@@ -100,7 +101,7 @@ func (a *Analyzer) Run(ctx context.Context) (Result, error) {
 					Kind: check.kind, Severity: Severity(inc.Score, a.opts.ZThreshold), Service: service,
 					WindowStart: ws, WindowEnd: we, Score: inc.Score, Observed: inc.Observed, Expected: inc.Expected,
 					Description: fmt.Sprintf("服务 %s 的%s在 %s ~ %s 期间突增：共 %.0f 条，基线约 %.0f 条（峰值 z=%.1f）",
-						displayService(service), check.label, ws.Format("01-02 15:04"), we.Format("15:04"), inc.Observed, inc.Expected, inc.Score),
+						parser.DisplayService(service), check.label, ws.Format("01-02 15:04"), we.Format("15:04"), inc.Observed, inc.Expected, inc.Score),
 				}
 				onlyErrors := check.kind == "error_spike"
 				top, err := a.topPatterns(ctx, service, ws, we, onlyErrors)
@@ -139,7 +140,7 @@ func (a *Analyzer) Run(ctx context.Context) (Result, error) {
 		an := store.Anomaly{
 			Kind: "new_pattern", Severity: sev, Service: p.Service, PatternID: &pid,
 			WindowStart: p.FirstSeen, WindowEnd: p.LastSeen, Observed: float64(p.Count), Score: float64(p.Count),
-			Description: fmt.Sprintf("服务 %s 首次出现新的 %s 日志模式：%s", displayService(p.Service), p.Level, p.Template),
+			Description: fmt.Sprintf("服务 %s 首次出现新的 %s 日志模式：%s", parser.DisplayService(p.Service), p.Level, p.Template),
 		}
 		an.Details, _ = json.Marshal(map[string]any{"template": p.Template, "sample": p.Sample, "count": p.Count})
 		inserted, err := a.store.UpsertAnomaly(ctx, fmt.Sprintf("new_pattern:%d", p.ID), an)
@@ -270,13 +271,6 @@ func (a *Analyzer) newPatterns(ctx context.Context, since time.Time) ([]store.Pa
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].FirstSeen.Before(out[j].FirstSeen) })
 	return out, rows.Err()
-}
-
-func displayService(s string) string {
-	if s == "" {
-		return "(未命名)"
-	}
-	return s
 }
 
 func maxTime(a, b time.Time) time.Time {
