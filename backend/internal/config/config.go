@@ -36,8 +36,8 @@ func Load() Config {
 		MaxUploadMB:     int64(envInt("MAX_UPLOAD_MB", 50)),
 		AnalyzeInterval: envDuration("ANALYZE_INTERVAL", time.Minute),
 		Bucket:          envDuration("ANALYZE_BUCKET", time.Minute),
-		BaselineBuckets: envInt("ANALYZE_BASELINE_BUCKETS", 30),
-		ZThreshold:      envFloat("ANALYZE_Z_THRESHOLD", 3),
+		BaselineBuckets: envInt("ANALYZE_BASELINE_BUCKETS", 60),
+		ZThreshold:      envFloat("ANALYZE_Z_THRESHOLD", 5),
 		MinCount:        envInt("ANALYZE_MIN_COUNT", 5),
 		AnalyzeLookback: envDuration("ANALYZE_LOOKBACK", 24*time.Hour),
 

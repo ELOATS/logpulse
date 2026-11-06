@@ -17,16 +17,21 @@ type Spike struct {
 	Index    int
 	Observed float64
 	Expected float64
-	Score    float64 // 鲁棒 z-score
+	Score    float64 // 等效 z 值：与观测值同样罕见的正态分布 z 值
 }
 
-// DetectSpikes 使用滑动基线 + 鲁棒 z-score（中位数 / MAD）检测突增。
+// DetectSpikes 在滑动基线上检测计数突增。
 //
 //   - baseline：用于计算基线的前序桶数量
-//   - threshold：z-score 阈值
-//   - minCount：观测值低于该值时忽略（避免低流量噪声）
+//   - threshold：等效 z 值阈值（4.5 约等于单侧 p = 3.4e-6）
+//   - minCount：观测值低于该值时忽略（避免极低流量下的零星事件）
 //
-// 与均值/标准差相比，中位数与 MAD 对历史中已存在的尖峰不敏感，误报更少。
+// 日志计数是"事件数"，低流量时随机波动服从 Poisson 分布，远比正态分布的尾部重；
+// 直接用 (x-均值)/标准差 会在低流量下产生大量误报。因此这里：
+//  1. 用截尾均值估计基线（去掉窗口中最高的 10%，历史尖峰不会抬高基线）；
+//  2. 方差不超过均值时按 Poisson 计算尾部概率 P(X ≥ x)，方差更大（过度离散，
+//     即比 Poisson 更"抖"）时按同均值、同方差的负二项分布计算；
+//  3. 把尾部概率换算成等效 z 值，使阈值与严重级别仍可按 z 值理解。
 func DetectSpikes(series []float64, baseline int, threshold float64, minCount float64) []Spike {
 	if baseline < 3 {
 		baseline = 3
@@ -34,29 +39,220 @@ func DetectSpikes(series []float64, baseline int, threshold float64, minCount fl
 	var spikes []Spike
 	window := make([]float64, 0, baseline)
 	for i := range series {
-		start := i - baseline
-		if start < 0 {
-			// 历史不足一半基线时不做判断，防止冷启动误报
-			if i < baseline/2 {
+		x := math.Round(series[i])
+		best := Spike{Index: i, Observed: x}
+		// 多时间尺度：单个桶捕捉尖峰；连续 3、5 个桶的总和捕捉"每个桶都不算太高、
+		// 但持续了好几分钟"的故障——这在低流量服务上很常见，单桶检验发现不了
+		for _, k := range scales {
+			from := i - k + 1 // 本次检验覆盖的桶 [from, i]
+			start := from - baseline
+			if from < 0 || start < -baseline/2 {
+				continue // 历史不足一半基线时不做判断，防止冷启动误报
+			}
+			window = append(window[:0], series[max(start, 0):from]...)
+			fit := fitBaseline(window)
+			// 预测被检验的 k 个桶的基线（沿趋势外推），并按 k 个桶求和
+			var mean, variance float64
+			for j := 0; j < k; j++ {
+				m := fit.predict(len(window) + j)
+				mean += m
+				variance += math.Max(fit.variance, m) // 方差不低于 Poisson 方差
+			}
+			// 多桶窗口：把窗口中最大的桶压到第二大的值再求和。孤立的尖峰会被"削平"
+			// （它由单桶检验负责），而持续升高时各桶相近，几乎不受影响
+			sum, top1, top2 := 0.0, 0.0, 0.0
+			for j := from; j <= i; j++ {
+				v := math.Round(series[j])
+				sum += v
+				if v > top1 {
+					top1, top2 = v, top1
+				} else if v > top2 {
+					top2 = v
+				}
+			}
+			if k > 1 {
+				sum -= top1 - top2
+			}
+			if k > 1 && x <= fit.predict(len(window)+k-1) {
+				break // 当前桶已恢复正常：不再用多桶窗口延长已结束的故障
+			}
+			if sum < minCount || sum <= mean {
 				continue
 			}
-			start = 0
+			if z := tailZ(sum, mean, variance); z > best.Score {
+				best.Score, best.Expected = z, mean/float64(k)
+			}
 		}
-		window = append(window[:0], series[start:i]...)
-		x := series[i]
-		if x < minCount {
-			continue
-		}
-		med := median(window)
-		mad := medianAbsDev(window, med)
-		// 1.4826 使 MAD 在正态分布下与标准差可比；加下限避免平稳序列除以 0
-		sigma := math.Max(1.4826*mad, math.Max(1, math.Sqrt(med)))
-		z := (x - med) / sigma
-		if z >= threshold {
-			spikes = append(spikes, Spike{Index: i, Observed: x, Expected: med, Score: z})
+		if best.Score >= threshold {
+			spikes = append(spikes, best)
 		}
 	}
 	return spikes
+}
+
+// scales 是检验的时间尺度（连续桶数）。
+var scales = []int{1, 3, 5}
+
+// 基线均值的下限：从未出现过的事件突然出现若干次，也按"平均每桶 0.25 次"评估，
+// 避免均值为 0 时任何一次出现都被判为无限罕见。
+const minMean = 0.25
+
+// baselineFit 是基线窗口上的稳健线性趋势：y ≈ a + b·t。
+type baselineFit struct {
+	a, b     float64
+	variance float64 // 残差方差（每桶）
+	lo, hi   float64 // 预测值的上下限，防止趋势外推过度
+}
+
+func countTrue(b []bool) float64 {
+	n := 0.0
+	for _, v := range b {
+		if v {
+			n++
+		}
+	}
+	return n
+}
+
+func (f baselineFit) predict(t int) float64 {
+	return math.Min(math.Max(f.a+f.b*float64(t), f.lo), f.hi)
+}
+
+// fitBaseline 用带离群点剔除的最小二乘拟合趋势：反复剔除明显高于趋势的点
+// （历史尖峰、上一次故障）后重新拟合。与窗口均值相比，它能跟上日周期等缓慢变化，
+// 不会因为"平均值滞后于当前水平"而产生误报。
+func fitBaseline(w []float64) baselineFit {
+	n := len(w)
+	keep := make([]bool, n)
+	for i := range keep {
+		keep[i] = true
+	}
+	var f baselineFit
+	for iter := 0; iter < 4; iter++ {
+		var sn, st, sy, stt, sty float64
+		for i, y := range w {
+			if keep[i] {
+				t := float64(i)
+				sn++
+				st += t
+				sy += y
+				stt += t * t
+				sty += t * y
+			}
+		}
+		if den := sn*stt - st*st; sn >= 3 && den > 0 {
+			f.b = (sn*sty - st*sy) / den
+		} else {
+			f.b = 0
+		}
+		f.a = (sy - f.b*st) / math.Max(sn, 1)
+		var ss float64
+		for i, y := range w {
+			if keep[i] {
+				r := y - (f.a + f.b*float64(i))
+				ss += r * r
+			}
+		}
+		f.variance = ss / math.Max(sn-2, 1)
+		// 斜率不显著（< 2.5 倍标准误）时视为没有趋势：低流量下斜率估计噪声很大，
+		// 外推会让基线忽高忽低；日周期等真实趋势在高流量下是显著的，仍会被采用
+		if sxx := stt - st*st/math.Max(sn, 1); sxx > 0 && math.Abs(f.b) < 2.5*math.Sqrt(math.Max(f.variance, sy/math.Max(sn, 1))/sxx) {
+			f.b = 0
+			f.a = sy / math.Max(sn, 1)
+			var ss0 float64
+			for i, y := range w {
+				if keep[i] {
+					ss0 += (y - f.a) * (y - f.a)
+				}
+			}
+			f.variance = ss0 / math.Max(sn-1, 1)
+		}
+		// 只剔除向上的离群点；+1 使极低计数（如 0/1/2）不被误剔
+		cut := 3*math.Sqrt(math.Max(f.variance, f.a+f.b*float64(n)/2)) + 1
+		changed := false
+		for i, y := range w {
+			if keep[i] && y-(f.a+f.b*float64(i)) > cut {
+				keep[i], changed = false, true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	// 离散度检验：在 Poisson 下 (n-1)·方差/均值 ~ χ²(n-1)。只有方差显著高于均值
+	// （过度离散）时才采用估计的方差；否则差异只是抽样噪声，按 Poisson 处理，
+	// 避免低流量下因方差估计偏高而降低检出率
+	m, sn := math.Max(f.a+f.b*float64(n)/2, minMean), countTrue(keep)
+	if sn > 2 && f.variance/m < 1+2.5*math.Sqrt(2/(sn-1)) {
+		f.variance = 0 // 使用时取 max(variance, mean)，即 Poisson 方差
+	}
+	f.lo, f.hi = minMean, minMean
+	for i, y := range w {
+		if keep[i] && y > f.hi {
+			f.hi = y
+		}
+	}
+	return f
+}
+
+// tailZ 计算 P(X ≥ x) 并换算为等效 z 值。
+func tailZ(x, mean, variance float64) float64 {
+	var logTail float64
+	if variance <= mean*1.05 {
+		logTail = poissonLogTail(x, mean)
+	} else {
+		logTail = negBinomLogTail(x, mean, variance)
+	}
+	return zFromLogTail(logTail)
+}
+
+// poissonLogTail 返回 ln P(X ≥ x)，X ~ Poisson(λ)。
+func poissonLogTail(x, lambda float64) float64 {
+	lg, _ := math.Lgamma(x + 1)
+	logP := x*math.Log(lambda) - lambda - lg
+	return logP + logSumRatio(x, func(k float64) float64 { return lambda / (k + 1) })
+}
+
+// negBinomLogTail 返回 ln P(X ≥ x)，X 为均值 m、方差 v 的负二项分布
+// （等价于速率服从 Gamma 分布的 Poisson，恰好刻画"比 Poisson 更抖"的计数）。
+func negBinomLogTail(x, m, v float64) float64 {
+	r := m * m / (v - m) // 形状参数
+	p := m / v           // 成功概率
+	lgxr, _ := math.Lgamma(x + r)
+	lgr, _ := math.Lgamma(r)
+	lgx, _ := math.Lgamma(x + 1)
+	logP := lgxr - lgr - lgx + r*math.Log(p) + x*math.Log1p(-p)
+	return logP + logSumRatio(x, func(k float64) float64 { return (k + r) / (k + 1) * (1 - p) })
+}
+
+// logSumRatio 计算 ln Σ_{k≥x} pmf(k)/pmf(x)，ratio(k) = pmf(k+1)/pmf(k)。
+// 只在 x 位于均值右侧时调用，此时各项单调递减，求和很快收敛。
+func logSumRatio(x float64, ratio func(float64) float64) float64 {
+	sum, term := 1.0, 1.0
+	for k := x; k < x+100000; k++ {
+		term *= ratio(k)
+		sum += term
+		if term < sum*1e-12 {
+			break
+		}
+	}
+	return math.Log(sum)
+}
+
+// zFromLogTail 把单侧尾部概率（对数）换算为标准正态的等效 z 值。
+func zFromLogTail(logTail float64) float64 {
+	if logTail >= 0 {
+		return 0
+	}
+	if logTail > math.Log(1e-10) {
+		return math.Sqrt2 * math.Erfcinv(2*math.Exp(logTail))
+	}
+	// 极小概率时用渐近式 Q(z) ≈ φ(z)/z 迭代求解，避免浮点下溢
+	z := math.Sqrt(-2 * logTail)
+	for i := 0; i < 5; i++ {
+		z = math.Sqrt(-2 * (logTail + math.Log(z) + 0.5*math.Log(2*math.Pi)))
+	}
+	return z
 }
 
 // Severity 根据 z-score 给出严重级别。

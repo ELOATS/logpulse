@@ -23,7 +23,11 @@
 - **日志模式聚类**：把消息中的可变部分（数字、IP、UUID、十六进制 ID、URL、时间、路径参数、引号字符串等）替换为占位符，得到模板；相同 `(服务, 级别, 模板)` 归为一类。几十万行日志通常只有几十种模式。
   - 例：`payment gateway timeout after 3333ms for order 73554` → `payment gateway timeout after <NUM> for order <NUM>`
 - **异常检测**（后台每分钟一次，导入后也会立即触发）：
-  - **错误突增 / 流量突增**：按服务、按时间桶统计，用滑动基线上的**鲁棒 z-score（中位数 + MAD）** 判断，历史中的尖峰不会抬高基线；相邻的突增桶会合并为一个事件，避免告警风暴。
+  - **错误突增 / 流量突增**：按服务、按分钟统计，在滑动基线上计算"当前计数有多罕见"：
+    - 基线用带离群点剔除的线性趋势拟合，历史尖峰不会抬高基线，日周期等缓慢变化也不会造成误报；
+    - 计数是事件数，低流量时按 **Poisson** 分布、波动更大（过度离散）时按 **负二项分布** 计算尾部概率，并换算为等效 z 值；
+    - 同时在 1、3、5 分钟三个时间尺度上检验：单分钟发现尖峰，多分钟发现"每分钟都不算太高但持续了几分钟"的故障；
+    - 相邻的突增合并为一个事件，避免告警风暴。
   - **新错误模式**：系统积累足够历史后，首次出现的 WARN/ERROR/FATAL 模式会被标记。
   - **根因线索**：每个突增事件附带窗口内占比最高的日志模式，一眼看出是哪类错误导致的。
 - **AI 异常分析**（可选）：调用 Claude 为异常生成一句话结论、影响评估、带日志证据的可能原因和按顺序排列的排查步骤。详见下文。
@@ -51,6 +55,13 @@ make sample        # 导入演示数据
 ```
 
 运行测试：`make test`
+
+检测质量评估（模拟多种流量与抖动程度，输出误报率与不同强度故障的检出率）：
+
+```bash
+cd backend && go test ./internal/analyzer -run TestDetectorQuality -v
+LOGPULSE_DETECTOR_SWEEP=1 go test ./internal/analyzer -run TestDetectorQuality -v   # 参数扫描
+```
 
 ## AI 异常分析
 
@@ -137,8 +148,8 @@ JSON 字段会自动识别：时间（`timestamp`/`time`/`ts`/`@timestamp`，支
 | `STATIC_DIR` | 空 | 设置后后端同时托管前端构建产物（单二进制部署） |
 | `ANALYZE_INTERVAL` | `1m` | 后台检测周期，`0` 表示仅在导入后触发 |
 | `ANALYZE_BUCKET` | `1m` | 时间桶大小 |
-| `ANALYZE_BASELINE_BUCKETS` | `30` | 基线窗口桶数 |
-| `ANALYZE_Z_THRESHOLD` | `3` | z-score 阈值（≥2 倍为高危，≥1.5 倍为中危） |
+| `ANALYZE_BASELINE_BUCKETS` | `60` | 基线窗口桶数 |
+| `ANALYZE_Z_THRESHOLD` | `5` | 等效 z 值阈值（≥2 倍为高危，≥1.5 倍为中危）。在模拟评估中，每条序列每天误报 ≤ 0.1 次 |
 | `ANALYZE_MIN_COUNT` | `5` | 单桶计数低于该值不告警，避免低流量噪声 |
 | `ANTHROPIC_API_KEY` | 空 | 设置后启用 AI 异常分析 |
 | `LLM_MODEL` | `claude-opus-5-5` | 使用的 Claude 模型 |

@@ -35,10 +35,10 @@ func New(s *store.Store, opts Options, log *slog.Logger) *Analyzer {
 		opts.Bucket = time.Minute
 	}
 	if opts.BaselineBuckets <= 0 {
-		opts.BaselineBuckets = 30
+		opts.BaselineBuckets = 60
 	}
 	if opts.ZThreshold <= 0 {
-		opts.ZThreshold = 3
+		opts.ZThreshold = 5
 	}
 	if opts.Lookback <= 0 {
 		opts.Lookback = 24 * time.Hour

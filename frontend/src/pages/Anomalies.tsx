@@ -77,7 +77,7 @@ export default function Anomalies() {
     <>
       <PageHeader
         title="异常检测"
-        description="基于滑动基线与鲁棒 z-score 检测错误突增、流量突增，并识别首次出现的错误模式"
+        description="按 Poisson / 负二项分布评估计数的罕见程度，检测错误突增、流量突增，并识别首次出现的错误模式"
         actions={
           <button className={buttonClass} onClick={() => analyze.mutate()} disabled={analyze.isPending}>
             <RefreshCw className={clsx('size-4', analyze.isPending && 'animate-spin')} />
@@ -153,7 +153,7 @@ function AnomalyCard({ a, aiEnabled, onAck }: { a: Anomaly; aiEnabled: boolean; 
             <dl className="grid grid-cols-3 gap-2">
               <Metric label="观测" value={fmtNumber(a.observed)} strong />
               <Metric label="基线" value={fmtNumber(Math.round(a.expected))} />
-              <Metric label="峰值 z" value={a.score.toFixed(1)} />
+              <Metric label="等效 z" value={a.score.toFixed(1)} />
             </dl>
           )}
           {!!a.details.top_patterns?.length && (
