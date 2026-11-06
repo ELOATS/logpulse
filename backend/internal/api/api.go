@@ -325,7 +325,7 @@ func (s *Server) patterns(w http.ResponseWriter, r *http.Request) {
 func (s *Server) anomalies(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	f := store.AnomalyFilter{Kind: q.Get("kind"), Severity: q.Get("severity"), Service: q.Get("service"), Limit: limit}
+	f := store.AnomalyFilter{Kind: q.Get("kind"), Severity: q.Get("severity"), Service: q.Get("service"), Sort: q.Get("sort"), Limit: limit}
 	if v := q.Get("acknowledged"); v != "" {
 		b := v == "true"
 		f.Acknowledged = &b

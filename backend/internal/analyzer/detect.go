@@ -97,6 +97,7 @@ type Incident struct {
 	Observed   float64 // 区间内观测总数
 	Expected   float64 // 区间内基线总数
 	Score      float64 // 区间内最大 z-score
+	Spikes     int     // 区间内突增桶的数量
 }
 
 // MergeSpikes 将间隔不超过 gap 个桶的突增合并为一个事件，避免同一故障产生大量告警。
@@ -109,9 +110,22 @@ func MergeSpikes(spikes []Spike, gap int) []Incident {
 			cur.Observed += s.Observed
 			cur.Expected += s.Expected
 			cur.Score = math.Max(cur.Score, s.Score)
+			cur.Spikes++
 			continue
 		}
-		out = append(out, Incident{Start: s.Index, End: s.Index + 1, Observed: s.Observed, Expected: s.Expected, Score: s.Score})
+		out = append(out, Incident{Start: s.Index, End: s.Index + 1, Observed: s.Observed, Expected: s.Expected, Score: s.Score, Spikes: 1})
 	}
 	return out
+}
+
+// Recount 用完整区间重新统计观测值与基线：合并时被跨过的间隔桶也计入，
+// 使数字与区间内的日志实际数量一致（基线按突增桶的平均基线外推到整个区间）。
+func (inc *Incident) Recount(series []float64) {
+	inc.Observed = 0
+	for i := inc.Start; i < inc.End && i < len(series); i++ {
+		inc.Observed += series[i]
+	}
+	if inc.Spikes > 0 {
+		inc.Expected = inc.Expected / float64(inc.Spikes) * float64(inc.End-inc.Start)
+	}
 }

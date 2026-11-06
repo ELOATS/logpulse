@@ -22,3 +22,37 @@ export function pickBucket(first?: string | null, last?: string | null) {
   const sec = options.find((o) => span / o <= 120) ?? 86400
   return sec >= 3600 ? `${sec / 3600}h` : `${sec / 60}m`
 }
+
+/** 将 "15m"、"1h"、"30s" 这样的时长转为毫秒 */
+export function durationMs(d: string) {
+  const m = /^(\d+)(s|m|h|d)$/.exec(d)
+  if (!m) return 60_000
+  return Number(m[1]) * { s: 1000, m: 60_000, h: 3600_000, d: 86400_000 }[m[2] as 's' | 'm' | 'h' | 'd']
+}
+
+/** 紧凑时间：MM-DD HH:mm:ss */
+export function fmtCompact(iso: string) {
+  const d = new Date(iso)
+  const pad = (x: number) => String(x).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+/** 相对时间：刚刚 / 5 分钟前 / 3 小时前 / 2 天前 */
+export function fmtRelative(iso: string, now = Date.now()) {
+  const sec = Math.round((now - new Date(iso).getTime()) / 1000)
+  if (sec < 45) return '刚刚'
+  if (sec < 3600) return `${Math.round(sec / 60)} 分钟前`
+  if (sec < 86400) return `${Math.round(sec / 3600)} 小时前`
+  if (sec < 30 * 86400) return `${Math.round(sec / 86400)} 天前`
+  return fmtTime(iso, false)
+}
+
+/** 时间范围选项（相对最新一条日志） */
+export const RANGES = [
+  { key: '1h', label: '1 小时', ms: 3600_000 },
+  { key: '6h', label: '6 小时', ms: 6 * 3600_000 },
+  { key: '24h', label: '24 小时', ms: 24 * 3600_000 },
+  { key: '7d', label: '7 天', ms: 7 * 86400_000 },
+  { key: 'all', label: '全部', ms: 0 },
+] as const
+export type RangeKey = (typeof RANGES)[number]['key']

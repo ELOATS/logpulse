@@ -94,6 +94,7 @@ func (a *Analyzer) Run(ctx context.Context) (Result, error) {
 		} {
 			spikes := DetectSpikes(check.values[:n], a.opts.BaselineBuckets, a.opts.ZThreshold, float64(a.opts.MinCount))
 			for _, inc := range MergeSpikes(spikes, 2) {
+				inc.Recount(check.values[:n])
 				ws, we := from.Add(time.Duration(inc.Start)*b), from.Add(time.Duration(inc.End)*b)
 				an := store.Anomaly{
 					Kind: check.kind, Severity: Severity(inc.Score, a.opts.ZThreshold), Service: service,

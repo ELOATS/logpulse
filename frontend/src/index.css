@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* 暗色模式由 <html class="dark"> 控制，支持手动切换与跟随系统 */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
@@ -10,3 +13,7 @@ body { @apply bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zi
 
 /* 代码与日志按原样显示，不启用字体连字（避免 "<!--"、"=>" 等被渲染成箭头） */
 pre, code, .font-mono { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+
+/* 定位到某条异常时短暂高亮 */
+@keyframes flash { from { box-shadow: 0 0 0 3px rgb(99 102 241 / 0.6); } to { box-shadow: 0 0 0 3px rgb(99 102 241 / 0); } }
+.flash { animation: flash 1.6s ease-out 1; }

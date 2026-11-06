@@ -41,3 +41,12 @@ func TestMergeSpikes(t *testing.T) {
 		t.Errorf("bad first incident %+v", inc[0])
 	}
 }
+
+func TestIncidentRecountIncludesGapBuckets(t *testing.T) {
+	series := []float64{0, 0, 10, 3, 12, 0}
+	inc := MergeSpikes([]Spike{{Index: 2, Observed: 10, Expected: 1}, {Index: 4, Observed: 12, Expected: 1}}, 2)[0]
+	inc.Recount(series)
+	if inc.Observed != 25 || inc.Expected != 3 {
+		t.Fatalf("got observed=%v expected=%v, want 25 / 3", inc.Observed, inc.Expected)
+	}
+}

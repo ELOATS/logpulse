@@ -472,6 +472,7 @@ type AnomalyFilter struct {
 	Severity     string
 	Service      string
 	Acknowledged *bool
+	Sort         string // time（默认）| severity
 	Limit        int
 }
 
@@ -502,8 +503,12 @@ func (s *Store) Anomalies(ctx context.Context, f AnomalyFilter) ([]Anomaly, erro
 		where = "WHERE " + strings.Join(conds, " AND ")
 	}
 	args = append(args, f.Limit)
+	order := "window_start DESC, score DESC"
+	if f.Sort == "severity" {
+		order = "CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, window_start DESC, score DESC"
+	}
 	rows, err := s.Pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM anomalies %s
-		ORDER BY window_start DESC, score DESC LIMIT $%d`, anomalyColumns, where, len(args)), args...)
+		ORDER BY %s LIMIT $%d`, anomalyColumns, where, order, len(args)), args...)
 	if err != nil {
 		return nil, err
 	}
