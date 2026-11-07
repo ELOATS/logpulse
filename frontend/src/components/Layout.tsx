@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { Activity, AlertTriangle, LayoutDashboard, Layers, Monitor, Moon, ScrollText, Sun, Upload } from 'lucide-react'
 import clsx from 'clsx'
-import { api } from '../lib/api'
+import { overviewAllQuery } from '../lib/queries'
 import { useTheme, type ThemePref } from '../lib/theme'
 
 const nav = [
@@ -63,7 +63,7 @@ export default function Layout() {
   useEffect(() => {
     if (!hash) mainRef.current?.scrollTo({ top: 0 })
   }, [pathname, hash])
-  const { data } = useQuery({ queryKey: ['overview', 'all'], queryFn: () => api.overview(), refetchInterval: 30_000 })
+  const { data } = useQuery(overviewAllQuery)
   const open = data?.open_anomalies ?? 0
   const badge = (to: string) =>
     to === '/anomalies' && open > 0 ? (

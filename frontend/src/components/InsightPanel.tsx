@@ -3,6 +3,7 @@ import { RefreshCw, Sparkles } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type Anomaly } from '../lib/api'
 import { fmtRelative } from '../lib/format'
+import { featuresQuery } from '../lib/queries'
 import { Skeleton, ghostButtonClass } from './ui'
 
 const confidence = {
@@ -14,7 +15,7 @@ const confidence = {
 /** 异常的 AI 分析：摘要、可能原因与排查步骤，支持生成/重新生成 */
 export default function InsightPanel({ anomaly, className }: { anomaly: Anomaly; className?: string }) {
   const qc = useQueryClient()
-  const features = useQuery({ queryKey: ['features'], queryFn: api.features, staleTime: Infinity })
+  const features = useQuery(featuresQuery)
   const generate = useMutation({
     mutationFn: () => api.generateInsight(anomaly.id),
     onSettled: () => qc.invalidateQueries({ queryKey: ['anomalies'] }),

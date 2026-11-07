@@ -5,27 +5,31 @@ import { Area, AreaChart, Bar, CartesianGrid, ComposedChart, Line, ReferenceArea
 import { ArrowRight, CheckCircle2, Sparkles, Upload } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type Anomaly, type Level, type TimePoint } from '../lib/api'
-import { durationMs, fmtNumber, fmtPercent, fmtRelative, fmtShortTime, fmtTime, pickBucket, RANGES, type RangeKey } from '../lib/format'
-import { LEVELS, levelColor, severityStripe } from '../lib/levels'
+import { durationMs, fmtNumber, fmtPercent, fmtRelative, fmtShortTime, fmtTime, pickBucket, RANGES, svcName, type RangeKey } from '../lib/format'
+import { anomalyKinds, ERROR_LEVELS_PARAM, LEVELS, levelColor, severityStripe } from '../lib/levels'
+import { overviewAllQuery } from '../lib/queries'
+import { logsUrl } from '../lib/url'
 import { useIsDark } from '../lib/theme'
 import Sparkline from '../components/Sparkline'
 import { Card, Empty, ErrorBox, LevelBadge, PageHeader, Segmented, SeverityBadge, Skeleton, SkeletonRows, StatCard, Template } from '../components/ui'
 
-const kindLabel: Record<Anomaly['kind'], string> = { error_spike: '错误突增', volume_spike: '流量突增', new_pattern: '新错误模式' }
-
 export default function Dashboard() {
   const [params, setParams] = useSearchParams()
   const range = (params.get('range') as RangeKey) || '24h'
-  const base = useQuery({ queryKey: ['overview', 'all'], queryFn: () => api.overview(), refetchInterval: 30_000 })
+  const base = useQuery(overviewAllQuery)
   const last = base.data?.last_log
   const ms = RANGES.find((r) => r.key === range)?.ms ?? 0
-  const from = last && ms ? new Date(new Date(last).getTime() - ms).toISOString() : undefined
-  const bucket = pickBucket(from ?? base.data?.first_log, last)
+  const rawFrom = last && ms ? new Date(last).getTime() - ms : undefined
+  const bucket = pickBucket(rawFrom !== undefined ? new Date(rawFrom).toISOString() : base.data?.first_log, last)
+  // 起点对齐到时间桶边界：首个桶是完整的；最新日志时间变化时查询键也保持稳定，不会反复重新请求
+  const bucketMs = durationMs(bucket)
+  const from = rawFrom !== undefined ? new Date(Math.floor(rawFrom / bucketMs) * bucketMs).toISOString() : undefined
 
+  // "全部"范围直接使用 base，不再重复请求同样的数据
   const overview = useQuery({
-    queryKey: ['overview', range, from],
+    queryKey: ['overview', 'range', from],
     queryFn: () => api.overview({ from }),
-    enabled: !!base.data,
+    enabled: !!from,
     refetchInterval: 30_000,
   })
   const series = useQuery({
@@ -56,7 +60,7 @@ export default function Dashboard() {
     )
   }
 
-  const o = overview.data
+  const o = from ? overview.data : base.data
   const pts = series.data ?? []
   const open = anomalies.data ?? []
   const bySeverity = { high: 0, medium: 0, low: 0 }
@@ -88,7 +92,7 @@ export default function Dashboard() {
           chart={<Sparkline data={pts.map((p) => p.total)} color="#6366f1" />}
         />
         <StatCard
-          label="错误" to="/logs?level=ERROR,FATAL" tone={o?.error_logs ? 'danger' : undefined}
+          label="错误" to={logsUrl({ level: ERROR_LEVELS_PARAM })} tone={o?.error_logs ? 'danger' : undefined}
           value={o ? fmtNumber(o.error_logs) : <Skeleton className="h-8 w-16" />}
           hint={o && `错误率 ${fmtPercent(o.error_rate)}`}
           chart={<Sparkline data={pts.map((p) => p.errors)} color={levelColor.ERROR} />}
@@ -141,7 +145,7 @@ export default function Dashboard() {
               <ul className="-my-1.5 divide-y divide-zinc-100 dark:divide-zinc-800">
                 {patterns.data.map((p) => (
                   <li key={p.id}>
-                    <Link to={`/logs?pattern_id=${p.id}`} className="group flex items-baseline gap-3 py-2">
+                    <Link to={logsUrl({ pattern_id: p.id })} className="group flex items-baseline gap-3 py-2">
                       <span className="min-w-0 flex-1">
                         <Template text={p.template} className="line-clamp-2 text-xs [overflow-wrap:anywhere] group-hover:text-indigo-600 dark:group-hover:text-indigo-400" />
                         <span className="text-[11px] text-zinc-500">{p.service}</span>
@@ -189,8 +193,8 @@ function Attention({ anomalies, loading }: { anomalies: Anomaly[]; loading: bool
             >
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
                 <SeverityBadge severity={a.severity} />
-                <span className="font-medium">{kindLabel[a.kind]}</span>
-                <span className="text-zinc-500">· {a.service || '(未命名)'}</span>
+                <span className="font-medium">{anomalyKinds[a.kind].label}</span>
+                <span className="text-zinc-500">· {svcName(a.service)}</span>
                 <span className="ml-auto text-zinc-400">{fmtRelative(a.window_start)}</span>
               </div>
               <p className="mt-2 line-clamp-2 text-sm">{a.ai_insight?.summary ?? a.description}</p>
@@ -311,7 +315,7 @@ function ServiceTable({ services }: { services: { name: string; count: number; e
           return (
             <tr key={s.name} className="border-b border-zinc-50 last:border-0 hover:bg-zinc-50 dark:border-zinc-800/60 dark:hover:bg-zinc-800/40">
               <td className="px-4 py-2">
-                <Link to={`/logs?service=${encodeURIComponent(s.name)}`} className="font-medium hover:text-indigo-600 dark:hover:text-indigo-400">{s.name || '(未命名)'}</Link>
+                <Link to={logsUrl({ service: s.name })} className="font-medium hover:text-indigo-600 dark:hover:text-indigo-400">{svcName(s.name)}</Link>
               </td>
               <td className="w-1/3 px-2 py-2">
                 <div className="flex items-center gap-2">
@@ -323,7 +327,7 @@ function ServiceTable({ services }: { services: { name: string; count: number; e
               </td>
               <td className="px-2 py-2 text-right tabular-nums">
                 {s.errors ? (
-                  <Link to={`/logs?service=${encodeURIComponent(s.name)}&level=ERROR,FATAL`} className="text-red-600 hover:underline dark:text-red-400">{fmtNumber(s.errors)}</Link>
+                  <Link to={logsUrl({ service: s.name, level: ERROR_LEVELS_PARAM })} className="text-red-600 hover:underline dark:text-red-400">{fmtNumber(s.errors)}</Link>
                 ) : <span className="text-zinc-400">0</span>}
               </td>
               <td className="px-4 py-2 text-right">
@@ -356,7 +360,7 @@ function LevelBar({ levels, total }: { levels: Partial<Record<Level, number>>; t
         {present.map((l) => (
           <li key={l} className="flex items-center gap-2 text-sm">
             <LevelBadge level={l} />
-            <Link to={`/logs?level=${l}`} className="tabular-nums hover:text-indigo-600 dark:hover:text-indigo-400">{fmtNumber(levels[l] ?? 0)}</Link>
+            <Link to={logsUrl({ level: l })} className="tabular-nums hover:text-indigo-600 dark:hover:text-indigo-400">{fmtNumber(levels[l] ?? 0)}</Link>
             <span className="ml-auto text-xs tabular-nums text-zinc-500">{fmtPercent((levels[l] ?? 0) / total)}</span>
           </li>
         ))}

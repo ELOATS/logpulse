@@ -1,11 +1,11 @@
 import { useRef, useState, type DragEvent } from 'react'
 import { Link } from 'react-router'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Check, CheckCircle2, Copy, FileText, FileUp, X } from 'lucide-react'
+import { CheckCircle2, FileText, FileUp, X } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type IngestResult } from '../lib/api'
 import { fmtNumber } from '../lib/format'
-import { Card, ErrorBox, PageHeader, Segmented, buttonClass, codeBlockClass, ghostButtonClass, inputClass } from '../components/ui'
+import { Card, CopyButton, ErrorBox, PageHeader, Segmented, buttonClass, codeBlockClass, ghostButtonClass, inputClass } from '../components/ui'
 
 const FORMATS = ['JSON 行', 'logfmt（slog / logrus）', 'Go log', 'zap', 'Nginx / Apache', 'Syslog', '通用文本', 'Go panic 堆栈', 'JS / Java 堆栈']
 
@@ -168,30 +168,19 @@ tail -n 1000 /var/log/nginx/access.log | \\
       code: `curl -F file=@app.log -F service=api ${origin}/api/logs/upload`,
     },
   }
-  const [copied, setCopied] = useState(false)
-  const copy = () =>
-    navigator.clipboard?.writeText(snippets[tab].code).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    })
   return (
     <Card
       title="接入方式"
       className="mt-4"
       actions={
-        <Segmented<Tab> value={tab} onChange={(t) => { setTab(t); setCopied(false) }} size="sm"
+        <Segmented<Tab> value={tab} onChange={setTab} size="sm"
           options={[{ value: 'browser', label: '前端错误采集' }, { value: 'api', label: 'HTTP API' }, { value: 'file', label: '文件上传' }]} />
       }
     >
       <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">{snippets[tab].desc}</p>
       <div className="relative">
         <pre className={clsx(codeBlockClass, 'pr-20')}>{snippets[tab].code}</pre>
-        <button
-          onClick={copy}
-          className="absolute top-2 right-2 inline-flex items-center gap-1 rounded-md bg-white/10 px-2 py-1 text-xs text-zinc-200 hover:bg-white/20"
-        >
-          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{copied ? '已复制' : '复制'}
-        </button>
+        <CopyButton text={snippets[tab].code} className="absolute top-2 right-2 rounded-md bg-white/10 px-2 py-1 text-xs text-zinc-200 hover:bg-white/20" />
       </div>
     </Card>
   )

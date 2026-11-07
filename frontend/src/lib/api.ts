@@ -81,9 +81,10 @@ export interface Features { ai_insight: boolean; ai_model?: string }
 export interface IngestResult { accepted: number; new_patterns: number }
 export interface AnalyzeResult { from: string; to: string; services: number; detected: number; new_anomalies: number; duration_ms: number }
 
-type Params = Record<string, string | number | boolean | undefined | null>
+export type Params = Record<string, string | number | boolean | undefined | null>
 
-function qs(params: Params = {}) {
+/** 拼接查询串，忽略空值 */
+export function qs(params: Params = {}) {
   const sp = new URLSearchParams()
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== '') sp.set(k, String(v))

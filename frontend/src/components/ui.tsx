@@ -1,7 +1,11 @@
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useState, type KeyboardEvent, type ReactNode, type Ref } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { Check, Copy, Search } from 'lucide-react'
 import { Link } from 'react-router'
 import clsx from 'clsx'
 import type { Level, Severity } from '../lib/api'
+import { svcName } from '../lib/format'
+import { servicesQuery } from '../lib/queries'
 
 export function Card({ title, actions, children, className, bodyClassName, flush }: {
   title?: ReactNode; actions?: ReactNode; children: ReactNode; className?: string; bodyClassName?: string
@@ -185,3 +189,55 @@ export const buttonClass =
 
 export const ghostButtonClass =
   'inline-flex items-center justify-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800'
+
+/** 复制按钮：点击后短暂显示"已复制" */
+export function CopyButton({ text, className }: { text: string; className?: string }) {
+  const [copied, setCopied] = useState(false)
+  useEffect(() => setCopied(false), [text])
+  const copy = () =>
+    navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  return (
+    <button onClick={copy} className={clsx('inline-flex items-center gap-1', className)}>
+      {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+      {copied ? '已复制' : '复制'}
+    </button>
+  )
+}
+
+/** 带放大镜图标的搜索框；kbd 为快捷键提示 */
+export function SearchInput({ value, onChange, placeholder, label, inputRef, onKeyDown, kbd, className }: {
+  value: string; onChange: (v: string) => void; placeholder: string; label?: string
+  inputRef?: Ref<HTMLInputElement>; onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void; kbd?: string; className?: string
+}) {
+  return (
+    <div className={clsx('relative min-w-0', className)}>
+      <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-zinc-400" />
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onKeyDown}
+        placeholder={placeholder}
+        aria-label={label ?? placeholder}
+        className={clsx(inputClass, 'w-full pl-9', kbd && 'pr-10')}
+      />
+      {kbd && (
+        <kbd className="pointer-events-none absolute top-2 right-2.5 hidden rounded border border-zinc-200 px-1.5 font-mono text-[11px] text-zinc-400 sm:block dark:border-zinc-700">{kbd}</kbd>
+      )}
+    </div>
+  )
+}
+
+/** 服务下拉框（选项来自已入库的服务列表） */
+export function ServiceSelect({ value, onChange, className }: { value: string; onChange: (v: string) => void; className?: string }) {
+  const services = useQuery(servicesQuery)
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} className={clsx(inputClass, className)} aria-label="服务">
+      <option value="">全部服务</option>
+      {services.data?.map((s) => <option key={s} value={s}>{svcName(s)}</option>)}
+    </select>
+  )
+}

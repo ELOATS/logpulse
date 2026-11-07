@@ -1,6 +1,9 @@
 export const fmtNumber = (n: number) => new Intl.NumberFormat('zh-CN').format(n)
 
-export const fmtPercent = (n: number) => `${(n * 100).toFixed(2)}%`
+export const fmtPercent = (n: number, digits = 2) => `${(n * 100).toFixed(digits)}%`
+
+/** 服务名为空时显示"(未命名)" */
+export const svcName = (s: string) => s || '(未命名)'
 
 export function fmtTime(iso: string, withSeconds = true) {
   const d = new Date(iso)

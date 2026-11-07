@@ -1,20 +1,17 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, AlertOctagon, Check, PartyPopper, RefreshCw, RotateCcw, ScrollText, Sparkle, TrendingUp } from 'lucide-react'
+import { Check, PartyPopper, RefreshCw, RotateCcw, ScrollText } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type Anomaly } from '../lib/api'
-import { fmtNumber, fmtRelative, fmtTime } from '../lib/format'
-import { severityStripe } from '../lib/levels'
+import { fmtNumber, fmtRelative, fmtShortTime, fmtTime, svcName } from '../lib/format'
+import { anomalyKinds as kinds, ERROR_LEVELS_PARAM, severityStripe } from '../lib/levels'
+import { featuresQuery } from '../lib/queries'
+import { logsUrl } from '../lib/url'
 import InsightPanel from '../components/InsightPanel'
 import { useToast } from '../components/Toast'
 import { Card, Empty, ErrorBox, LevelBadge, PageHeader, Segmented, SeverityBadge, SkeletonRows, Template, buttonClass, ghostButtonClass } from '../components/ui'
 
-const kinds: Record<Anomaly['kind'], { label: string; icon: typeof Activity }> = {
-  error_spike: { label: '错误突增', icon: AlertOctagon },
-  volume_spike: { label: '流量突增', icon: TrendingUp },
-  new_pattern: { label: '新错误模式', icon: Sparkle },
-}
 type Status = 'open' | 'acked' | 'all'
 
 export default function Anomalies() {
@@ -30,7 +27,7 @@ export default function Anomalies() {
       limit: 200,
     }),
   })
-  const features = useQuery({ queryKey: ['features'], queryFn: api.features, staleTime: Infinity })
+  const features = useQuery(featuresQuery)
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['anomalies'] })
     qc.invalidateQueries({ queryKey: ['overview'] })
@@ -52,7 +49,7 @@ export default function Anomalies() {
     onError: (_e, _v, ctx) => ctx?.snapshot.forEach(([key, data]) => qc.setQueryData(key, data)),
     onSuccess: (_d, { a, value }) =>
       toast({
-        message: value ? `已确认：${kinds[a.kind].label} · ${a.service || '(未命名)'}` : '已重新打开',
+        message: value ? `已确认：${kinds[a.kind].label} · ${svcName(a.service)}` : '已重新打开',
         action: value ? { label: '撤销', onClick: () => ack.mutate({ a, value: false }) } : undefined,
       }),
     onSettled: invalidate,
@@ -121,8 +118,8 @@ export default function Anomalies() {
 function AnomalyCard({ a, aiEnabled, onAck }: { a: Anomaly; aiEnabled: boolean; onAck: (value: boolean) => void }) {
   const Icon = kinds[a.kind].icon
   const logsLink = a.kind === 'new_pattern' && a.pattern_id
-    ? `/logs?pattern_id=${a.pattern_id}`
-    : `/logs?${new URLSearchParams({ service: a.service, from: a.window_start, to: a.window_end, ...(a.kind === 'error_spike' ? { level: 'ERROR,FATAL' } : {}) })}`
+    ? logsUrl({ pattern_id: a.pattern_id })
+    : logsUrl({ service: a.service, from: a.window_start, to: a.window_end, level: a.kind === 'error_spike' ? ERROR_LEVELS_PARAM : undefined })
   const showAI = aiEnabled || !!a.ai_insight
 
   return (
@@ -134,9 +131,9 @@ function AnomalyCard({ a, aiEnabled, onAck }: { a: Anomaly; aiEnabled: boolean; 
         <Icon className="size-4 text-zinc-500" />
         <span className="text-sm font-semibold">{kinds[a.kind].label}</span>
         <SeverityBadge severity={a.severity} />
-        <span className="text-sm text-zinc-600 dark:text-zinc-400">{a.service || '(未命名)'}</span>
+        <span className="text-sm text-zinc-600 dark:text-zinc-400">{svcName(a.service)}</span>
         <span className="text-xs text-zinc-500" title={`${fmtTime(a.window_start)} ~ ${fmtTime(a.window_end)}`}>
-          {fmtTime(a.window_start, false)} ~ {fmtTime(a.window_end, false).slice(11)} · {fmtRelative(a.window_start)}
+          {fmtTime(a.window_start, false)} ~ {fmtShortTime(a.window_end)} · {fmtRelative(a.window_start)}
         </span>
         <div className="ml-auto flex gap-2">
           <Link to={logsLink} className={clsx(ghostButtonClass, 'px-2.5 py-1 text-xs')}><ScrollText className="size-3.5" />查看日志</Link>
@@ -162,7 +159,7 @@ function AnomalyCard({ a, aiEnabled, onAck }: { a: Anomaly; aiEnabled: boolean; 
               <ul className="space-y-1">
                 {a.details.top_patterns.map((p) => (
                   <li key={p.pattern_id}>
-                    <Link to={`/logs?pattern_id=${p.pattern_id}`} className="group flex items-center gap-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs hover:bg-zinc-100 dark:bg-zinc-800/50 dark:hover:bg-zinc-800">
+                    <Link to={logsUrl({ pattern_id: p.pattern_id })} className="group flex items-center gap-2 rounded-md bg-zinc-50 px-2 py-1.5 text-xs hover:bg-zinc-100 dark:bg-zinc-800/50 dark:hover:bg-zinc-800">
                       <LevelBadge level={p.level} />
                       <Template text={p.template} className="line-clamp-2 min-w-0 flex-1 [overflow-wrap:anywhere] group-hover:text-indigo-600 dark:group-hover:text-indigo-400" />
                       <span className="tabular-nums text-zinc-500">{fmtNumber(p.count)}</span>

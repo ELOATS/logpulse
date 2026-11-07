@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { Link } from 'react-router'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { Check, ChevronDown, ChevronRight, Copy, Search, SearchX, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, SearchX, X } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type Level, type LogRow } from '../lib/api'
-import { fmtCompact, fmtNumber, fmtTime } from '../lib/format'
-import { Card, Empty, ErrorBox, Highlight, LevelBadge, PageHeader, SkeletonRows, buttonClass, codeBlockClass, ghostButtonClass, inputClass } from '../components/ui'
+import { fmtCompact, fmtNumber, fmtTime, svcName } from '../lib/format'
+import { ERROR_LEVELS, STACK_KEYS } from '../lib/levels'
+import { logsUrl, useParamPatch } from '../lib/url'
+import { Card, CopyButton, Empty, ErrorBox, Highlight, LevelBadge, PageHeader, SearchInput, ServiceSelect, SkeletonRows, buttonClass, codeBlockClass, ghostButtonClass } from '../components/ui'
 
 const PAGE_SIZE = 50
 const LEVEL_CHIPS: { label: string; levels: Level[]; cls: string }[] = [
-  { label: '错误', levels: ['ERROR', 'FATAL'], cls: 'data-[on=true]:border-red-300 data-[on=true]:bg-red-50 data-[on=true]:text-red-700 dark:data-[on=true]:border-red-500/40 dark:data-[on=true]:bg-red-500/15 dark:data-[on=true]:text-red-300' },
+  { label: '错误', levels: ERROR_LEVELS, cls: 'data-[on=true]:border-red-300 data-[on=true]:bg-red-50 data-[on=true]:text-red-700 dark:data-[on=true]:border-red-500/40 dark:data-[on=true]:bg-red-500/15 dark:data-[on=true]:text-red-300' },
   { label: '告警', levels: ['WARN'], cls: 'data-[on=true]:border-amber-300 data-[on=true]:bg-amber-50 data-[on=true]:text-amber-700 dark:data-[on=true]:border-amber-500/40 dark:data-[on=true]:bg-amber-500/15 dark:data-[on=true]:text-amber-300' },
   { label: '信息', levels: ['INFO'], cls: 'data-[on=true]:border-sky-300 data-[on=true]:bg-sky-50 data-[on=true]:text-sky-700 dark:data-[on=true]:border-sky-500/40 dark:data-[on=true]:bg-sky-500/15 dark:data-[on=true]:text-sky-300' },
   { label: '调试', levels: ['DEBUG'], cls: 'data-[on=true]:border-zinc-400 data-[on=true]:bg-zinc-100 data-[on=true]:text-zinc-700 dark:data-[on=true]:bg-zinc-800 dark:data-[on=true]:text-zinc-300' },
@@ -19,7 +21,7 @@ const rowAccent: Partial<Record<Level, string>> = {
 }
 
 export default function Logs() {
-  const [params, setParams] = useSearchParams()
+  const [params, update, setParams] = useParamPatch({ resetPage: true })
   const q = params.get('q') ?? ''
   const level = params.get('level') ?? ''
   const service = params.get('service') ?? ''
@@ -48,22 +50,12 @@ export default function Logs() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  const services = useQuery({ queryKey: ['services'], queryFn: api.services })
   const logs = useQuery({
     queryKey: ['logs', q, level, service, patternId, from, to, page],
     queryFn: () => api.logs({ q, level, service, pattern_id: patternId, from, to, limit: PAGE_SIZE, offset: page * PAGE_SIZE }),
     placeholderData: keepPreviousData,
   })
 
-  const update = (patch: Record<string, string>) => {
-    const next = new URLSearchParams(params)
-    for (const [k, v] of Object.entries(patch)) {
-      if (v) next.set(k, v)
-      else next.delete(k)
-    }
-    if (!('page' in patch)) next.delete('page')
-    setParams(next)
-  }
   const toggleLevels = (levels: Level[]) => {
     const on = levels.every((l) => activeLevels.has(l))
     levels.forEach((l) => (on ? activeLevels.delete(l) : activeLevels.add(l)))
@@ -96,19 +88,16 @@ export default function Logs() {
       <PageHeader title="日志检索" description={<>全文检索支持 <code className="text-xs">timeout -health</code>、<code className="text-xs">"connection refused"</code> 等写法</>} />
       <Card bodyClassName="space-y-3">
         <form onSubmit={onSubmit} className="flex gap-2">
-          <div className="relative min-w-0 flex-1">
-            <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-zinc-400" />
-            <input
-              ref={searchRef}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Escape') { setDraft(''); if (q) update({ q: '' }) } }}
-              placeholder="搜索日志内容…"
-              aria-label="搜索日志"
-              className={`${inputClass} w-full pr-10 pl-9`}
-            />
-            <kbd className="pointer-events-none absolute top-2 right-2.5 hidden rounded border border-zinc-200 px-1.5 font-mono text-[11px] text-zinc-400 sm:block dark:border-zinc-700">/</kbd>
-          </div>
+          <SearchInput
+            className="flex-1"
+            inputRef={searchRef}
+            value={draft}
+            onChange={setDraft}
+            onKeyDown={(e) => { if (e.key === 'Escape') { setDraft(''); if (q) update({ q: '' }) } }}
+            placeholder="搜索日志内容…"
+            label="搜索日志"
+            kbd="/"
+          />
           <button className={buttonClass}>搜索</button>
         </form>
         <div className="flex flex-wrap items-center gap-2">
@@ -122,10 +111,7 @@ export default function Logs() {
               {c.label}
             </button>
           ))}
-          <select value={service} onChange={(e) => update({ service: e.target.value })} className={`${inputClass} h-8 text-xs`} aria-label="服务">
-            <option value="">全部服务</option>
-            {services.data?.map((s) => <option key={s} value={s}>{s || '(未命名)'}</option>)}
-          </select>
+          <ServiceSelect value={service} onChange={(v) => update({ service: v })} className="h-8 text-xs" />
           {patternId && <FilterChip label={`模式 #${patternId}`} onClear={() => update({ pattern_id: '' })} />}
           {(from || to) && (
             <FilterChip label={`${from ? fmtTime(from, false) : '…'} ~ ${to ? fmtTime(to, false) : '…'}`} onClear={() => update({ from: '', to: '' })} />
@@ -183,8 +169,9 @@ function FilterChip({ label, onClear }: { label: string; onClear: () => void }) 
 
 function LogRowView({ row, query }: { row: LogRow; query: string }) {
   const [open, setOpen] = useState(false)
-  const attrs = Object.entries(row.attributes ?? {}).filter(([k]) => k !== 'stack' && k !== 'stacktrace')
-  const stack = (row.attributes?.stack ?? row.attributes?.stacktrace) as string | undefined
+  const stackKey = STACK_KEYS.find((k) => typeof row.attributes?.[k] === 'string')
+  const stack = stackKey ? (row.attributes[stackKey] as string) : undefined
+  const attrs = Object.entries(row.attributes ?? {}).filter(([k]) => k !== stackKey)
   const location = row.attributes?.error_location as string | undefined
   return (
     <div className={clsx('border-l-2', rowAccent[row.level] ?? 'border-l-transparent')}>
@@ -198,7 +185,7 @@ function LogRowView({ row, query }: { row: LogRow; query: string }) {
         <span className="flex items-center gap-2 text-xs md:contents">
           <span className="font-mono whitespace-nowrap text-zinc-500 tabular-nums" title={fmtTime(row.timestamp)}>{fmtCompact(row.timestamp)}</span>
           <span><LevelBadge level={row.level} /></span>
-          <span className="truncate text-zinc-600 dark:text-zinc-400">{row.service}</span>
+          <span className="truncate text-zinc-600 dark:text-zinc-400">{svcName(row.service)}</span>
         </span>
         <span className="min-w-0 font-mono text-xs leading-5 break-all">
           <Highlight text={row.message} query={query} />
@@ -211,8 +198,6 @@ function LogRowView({ row, query }: { row: LogRow; query: string }) {
 }
 
 function LogDetail({ row, attrs, stack }: { row: LogRow; attrs: [string, unknown][]; stack?: string }) {
-  const [copied, setCopied] = useState(false)
-  const copy = () => navigator.clipboard?.writeText(row.raw).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) })
   return (
     <div className="space-y-3 bg-zinc-50/70 px-4 pt-1 pb-4 text-xs md:pl-12 dark:bg-zinc-800/20">
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
@@ -220,7 +205,7 @@ function LogDetail({ row, attrs, stack }: { row: LogRow; attrs: [string, unknown
         <dt className="text-zinc-500">格式</dt><dd>{row.format}</dd>
         {row.host && (<><dt className="text-zinc-500">主机</dt><dd>{row.host}</dd></>)}
         {row.pattern_id && (
-          <><dt className="text-zinc-500">模式</dt><dd><Link className="text-indigo-600 hover:underline dark:text-indigo-400" to={`/logs?pattern_id=${row.pattern_id}`}>#{row.pattern_id} 查看同类日志</Link></dd></>
+          <><dt className="text-zinc-500">模式</dt><dd><Link className="text-indigo-600 hover:underline dark:text-indigo-400" to={logsUrl({ pattern_id: row.pattern_id })}>#{row.pattern_id} 查看同类日志</Link></dd></>
         )}
         {attrs.map(([k, v]) => (
           <div key={k} className="contents">
@@ -238,9 +223,7 @@ function LogDetail({ row, attrs, stack }: { row: LogRow; attrs: [string, unknown
       <div>
         <div className="mb-1 flex items-center justify-between text-zinc-500">
           原始日志
-          <button onClick={copy} className="inline-flex items-center gap-1 hover:text-zinc-800 dark:hover:text-zinc-200">
-            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{copied ? '已复制' : '复制'}
-          </button>
+          <CopyButton text={row.raw} className="hover:text-zinc-800 dark:hover:text-zinc-200" />
         </div>
         <pre className={`${codeBlockClass} max-h-72 break-all whitespace-pre-wrap`}>{row.raw}</pre>
       </div>

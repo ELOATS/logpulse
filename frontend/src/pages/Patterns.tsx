@@ -1,28 +1,23 @@
 import { useState } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { Link } from 'react-router'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { Layers, Search } from 'lucide-react'
+import { Layers } from 'lucide-react'
 import { api } from '../lib/api'
-import { fmtNumber, fmtRelative, fmtTime } from '../lib/format'
+import { fmtNumber, fmtPercent, fmtRelative, fmtTime, svcName } from '../lib/format'
 import { LEVELS } from '../lib/levels'
-import { Card, Empty, ErrorBox, LevelBadge, PageHeader, Segmented, SkeletonRows, Template, inputClass } from '../components/ui'
+import { logsUrl, useParamPatch } from '../lib/url'
+import { Card, Empty, ErrorBox, LevelBadge, PageHeader, SearchInput, Segmented, ServiceSelect, SkeletonRows, Template, inputClass } from '../components/ui'
 
 type Sort = 'count' | 'recent' | 'new'
 
 export default function Patterns() {
-  const [params, setParams] = useSearchParams()
+  const [params, patch] = useParamPatch({ replace: true })
+  const set = (k: string, v: string) => patch({ [k]: v })
   const service = params.get('service') ?? ''
   const level = params.get('level') ?? ''
   const sort = (params.get('sort') as Sort) || 'count'
   const [q, setQ] = useState('')
-  const set = (k: string, v: string) => {
-    const next = new URLSearchParams(params)
-    if (v) next.set(k, v)
-    else next.delete(k)
-    setParams(next, { replace: true })
-  }
 
-  const services = useQuery({ queryKey: ['services'], queryFn: api.services })
   const patterns = useQuery({
     queryKey: ['patterns', service, level, sort, q],
     queryFn: () => api.patterns({ service, level, sort, q, limit: 200 }),
@@ -39,14 +34,8 @@ export default function Patterns() {
         description="数字、IP、UUID、路径参数等可变部分被替换为占位符，相同结构的日志归为一类"
       />
       <Card bodyClassName="flex flex-wrap items-center gap-2">
-        <div className="relative min-w-52 flex-1">
-          <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-zinc-400" />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="过滤模板或样例…" className={`${inputClass} w-full pl-9`} />
-        </div>
-        <select value={service} onChange={(e) => set('service', e.target.value)} className={inputClass} aria-label="服务">
-          <option value="">全部服务</option>
-          {services.data?.map((s) => <option key={s} value={s}>{s || '(未命名)'}</option>)}
-        </select>
+        <SearchInput className="min-w-52 flex-1" value={q} onChange={setQ} placeholder="过滤模板或样例…" />
+        <ServiceSelect value={service} onChange={(v) => set('service', v)} />
         <select value={level} onChange={(e) => set('level', e.target.value)} className={inputClass} aria-label="级别">
           <option value="">全部级别</option>
           {LEVELS.map((l) => <option key={l}>{l}</option>)}
@@ -69,11 +58,11 @@ export default function Patterns() {
           <ul className={patterns.isPlaceholderData ? 'opacity-60' : ''}>
             {list.map((p) => (
               <li key={p.id} className="border-b border-zinc-100 last:border-0 dark:border-zinc-800">
-                <Link to={`/logs?pattern_id=${p.id}`} className="group grid gap-x-4 gap-y-1.5 px-4 py-3 hover:bg-zinc-50 md:grid-cols-[1fr_12rem] dark:hover:bg-zinc-800/40">
+                <Link to={logsUrl({ pattern_id: p.id })} className="group grid gap-x-4 gap-y-1.5 px-4 py-3 hover:bg-zinc-50 md:grid-cols-[1fr_12rem] dark:hover:bg-zinc-800/40">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 text-xs">
                       <LevelBadge level={p.level} />
-                      <span className="truncate text-zinc-500">{p.service || '(未命名)'}</span>
+                      <span className="truncate text-zinc-500">{svcName(p.service)}</span>
                     </div>
                     <Template text={p.template} className="mt-1.5 block text-sm [overflow-wrap:anywhere] group-hover:text-indigo-700 dark:group-hover:text-indigo-300" />
                     <div className="mt-1 truncate font-mono text-xs text-zinc-400" title={p.sample}>{p.sample}</div>
@@ -86,7 +75,7 @@ export default function Patterns() {
                       <span className="w-16 text-right text-sm font-medium tabular-nums">{fmtNumber(p.count)}</span>
                     </div>
                     <div className="text-xs text-zinc-500 tabular-nums" title={`首次 ${fmtTime(p.first_seen)} · 最近 ${fmtTime(p.last_seen)}`}>
-                      {total > 0 && `${((p.count / total) * 100).toFixed(1)}% · `}最近 {fmtRelative(p.last_seen)}
+                      {total > 0 && `${fmtPercent(p.count / total, 1)} · `}最近 {fmtRelative(p.last_seen)}
                     </div>
                   </div>
                 </Link>
