@@ -65,7 +65,7 @@ func main() {
 		Handler: (&api.Server{
 			Store: st, Analyzer: an, Log: log,
 			AllowedOrigin: cfg.AllowedOrigin, MaxUploadMB: cfg.MaxUploadMB,
-			StaticDir: os.Getenv("STATIC_DIR"), Insights: insights,
+			StaticDir: cfg.StaticDir, Insights: insights,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

@@ -238,61 +238,41 @@ func (b *batcher) flush() error {
 }
 
 func (s *Server) searchLogs(w http.ResponseWriter, r *http.Request) {
-	f, err := logFilterFromQuery(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+	f, ok := s.filter(w, r)
+	if ok {
+		page, err := s.Store.SearchLogs(r.Context(), f)
+		s.reply(w, page, err)
 	}
-	page, err := s.Store.SearchLogs(r.Context(), f)
-	if err != nil {
-		s.serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
-	f, err := logFilterFromQuery(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+	f, ok := s.filter(w, r)
+	if ok {
+		o, err := s.Store.Overview(r.Context(), f.From, f.To)
+		s.reply(w, o, err)
 	}
-	o, err := s.Store.Overview(r.Context(), f.From, f.To)
-	if err != nil {
-		s.serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, o)
 }
 
 func (s *Server) timeseries(w http.ResponseWriter, r *http.Request) {
-	f, err := logFilterFromQuery(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	f, ok := s.filter(w, r)
+	if !ok {
 		return
 	}
 	bucket := time.Minute
 	if b := r.URL.Query().Get("bucket"); b != "" {
+		var err error
 		if bucket, err = time.ParseDuration(b); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid bucket")
 			return
 		}
 	}
 	pts, err := s.Store.Timeseries(r.Context(), f, bucket)
-	if err != nil {
-		s.serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, pts)
+	s.reply(w, pts, err)
 }
 
 func (s *Server) services(w http.ResponseWriter, r *http.Request) {
 	svcs, err := s.Store.Services(r.Context())
-	if err != nil {
-		s.serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, svcs)
+	s.reply(w, svcs, err)
 }
 
 func (s *Server) patterns(w http.ResponseWriter, r *http.Request) {
@@ -301,11 +281,7 @@ func (s *Server) patterns(w http.ResponseWriter, r *http.Request) {
 	ps, err := s.Store.Patterns(r.Context(), store.PatternFilter{
 		Service: q.Get("service"), Level: q.Get("level"), Query: q.Get("q"), Sort: q.Get("sort"), Limit: limit,
 	})
-	if err != nil {
-		s.serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, ps)
+	s.reply(w, ps, err)
 }
 
 func (s *Server) anomalies(w http.ResponseWriter, r *http.Request) {
@@ -317,36 +293,21 @@ func (s *Server) anomalies(w http.ResponseWriter, r *http.Request) {
 		f.Acknowledged = &b
 	}
 	as, err := s.Store.Anomalies(r.Context(), f)
-	if err != nil {
-		s.serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, as)
+	s.reply(w, as, err)
 }
 
 func (s *Server) ackAnomaly(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+	id, ok := pathID(w, r)
+	if !ok {
 		return
 	}
 	body := struct {
 		Acknowledged *bool `json:"acknowledged"`
 	}{}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	ack := true
-	if body.Acknowledged != nil {
-		ack = *body.Acknowledged
-	}
-	if err := s.Store.AckAnomaly(r.Context(), id, ack); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "anomaly not found")
-			return
-		}
-		s.serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "acknowledged": ack})
+	ack := body.Acknowledged == nil || *body.Acknowledged
+	err := s.Store.AckAnomaly(r.Context(), id, ack)
+	s.reply(w, map[string]any{"id": id, "acknowledged": ack}, err)
 }
 
 func (s *Server) features(w http.ResponseWriter, _ *http.Request) {
@@ -362,9 +323,8 @@ func (s *Server) generateInsight(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "未启用 AI 分析：请为后端设置 ANTHROPIC_API_KEY")
 		return
 	}
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+	id, ok := pathID(w, r)
+	if !ok {
 		return
 	}
 	a, err := s.Insights.Generate(r.Context(), id)
@@ -383,14 +343,42 @@ func (s *Server) generateInsight(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 	res, err := s.Analyzer.Run(r.Context())
-	if err != nil {
-		s.serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, res)
+	s.reply(w, res, err)
 }
 
 // ---------- helpers ----------
+
+// reply 在 err 为空时以 200 返回 v；记录不存在返回 404，其他错误返回 500。
+func (s *Server) reply(w http.ResponseWriter, v any, err error) {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		writeError(w, http.StatusNotFound, "not found")
+	case err != nil:
+		s.serverError(w, err)
+	default:
+		writeJSON(w, http.StatusOK, v)
+	}
+}
+
+// filter 解析检索条件，出错时直接返回 400。
+func (s *Server) filter(w http.ResponseWriter, r *http.Request) (store.LogFilter, bool) {
+	f, err := logFilterFromQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return f, false
+	}
+	return f, true
+}
+
+// pathID 解析路径中的 {id}，出错时直接返回 400。
+func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return 0, false
+	}
+	return id, true
+}
 
 func logFilterFromQuery(r *http.Request) (store.LogFilter, error) {
 	q := r.URL.Query()

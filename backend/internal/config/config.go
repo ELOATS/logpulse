@@ -12,17 +12,18 @@ type Config struct {
 	DatabaseURL     string        // PostgreSQL 连接串
 	AllowedOrigin   string        // CORS 允许的来源
 	MaxUploadMB     int64         // 上传文件大小上限
+	StaticDir       string        // 可选：同时托管前端构建产物的目录
 	AnalyzeInterval time.Duration // 后台异常检测周期，0 表示关闭
 	Bucket          time.Duration // 时间桶大小
 	BaselineBuckets int           // 基线窗口包含的桶数
-	ZThreshold      float64       // 触发异常的 z-score 阈值
+	ZThreshold      float64       // 触发异常的等效 z 值阈值
 	MinCount        int           // 触发异常所需的最小计数
 	AnalyzeLookback time.Duration // 每次分析回溯的时间范围
 
-	// 大模型异常摘要（设置 ANTHROPIC_API_KEY 后启用）
 	// 数据保留：删除早于 N 天的日志分区，0 表示不清理
 	RetentionDays int
 
+	// 大模型异常摘要（设置 ANTHROPIC_API_KEY 后启用）
 	LLMEnabled       bool
 	LLMModel         string
 	LLMEffort        string // low | medium | high | xhigh | max
@@ -37,6 +38,7 @@ func Load() Config {
 		DatabaseURL:     env("DATABASE_URL", "postgres://loganalyzer:loganalyzer@localhost:5432/loganalyzer?sslmode=disable"),
 		AllowedOrigin:   env("ALLOWED_ORIGIN", "*"),
 		MaxUploadMB:     int64(envInt("MAX_UPLOAD_MB", 50)),
+		StaticDir:       os.Getenv("STATIC_DIR"),
 		AnalyzeInterval: envDuration("ANALYZE_INTERVAL", time.Minute),
 		Bucket:          envDuration("ANALYZE_BUCKET", time.Minute),
 		BaselineBuckets: envInt("ANALYZE_BASELINE_BUCKETS", 60),

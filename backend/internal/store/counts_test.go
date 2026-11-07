@@ -4,54 +4,21 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/eloats/logpulse/backend/internal/db"
+	"github.com/eloats/logpulse/backend/internal/dbtest"
 	"github.com/eloats/logpulse/backend/internal/parser"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// 集成测试：需要 PostgreSQL。
-//
-//	LOGPULSE_TEST_DATABASE_URL=postgres://user:pass@localhost:5432/db?sslmode=disable go test ./internal/store
-//
-// 每次运行在独立的临时 schema 中建表，结束后删除。
+// 集成测试：需要 PostgreSQL，见 dbtest 包说明。
 func testStore(t *testing.T) *Store { return testStoreAt(t, "") }
 
 // testStoreAt 在临时 schema 中执行到指定迁移版本（空表示全部）。
 func testStoreAt(t *testing.T, migration string) *Store {
-	url := os.Getenv("LOGPULSE_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("未设置 LOGPULSE_TEST_DATABASE_URL，跳过数据库集成测试")
-	}
-	ctx := context.Background()
-	schema := fmt.Sprintf("lp_test_%d", time.Now().UnixNano())
-	admin, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatal(err)
-	}
-	cfg, _ := pgxpool.ParseConfig(url)
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
-		admin.Close()
-	})
-	if err := db.MigrateTo(ctx, pool, migration); err != nil {
-		t.Fatal(err)
-	}
-	return New(pool)
+	return New(dbtest.Pool(t, migration))
 }
 
 var t0 = time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
