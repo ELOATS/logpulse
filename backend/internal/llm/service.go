@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/eloats/logpulse/backend/internal/parser"
 	"github.com/eloats/logpulse/backend/internal/store"
 )
 
@@ -65,7 +66,7 @@ func (s *Service) AutoGenerate(ctx context.Context) {
 
 func (s *Service) collect(ctx context.Context, a store.Anomaly) (Input, error) {
 	in := Input{Anomaly: a}
-	f := store.LogFilter{Service: a.Service, Limit: s.SampleLines}
+	f := store.LogFilter{Service: a.Service, Limit: s.SampleLines, SkipCount: true}
 	from, to := a.WindowStart, a.WindowEnd
 	switch a.Kind {
 	case "new_pattern":
@@ -74,7 +75,7 @@ func (s *Service) collect(ctx context.Context, a store.Anomaly) (Input, error) {
 		}
 		f.Limit = min(s.SampleLines, 10) // 同一模式的样例高度相似，少量即可
 	case "error_spike":
-		f.Levels = []string{"ERROR", "FATAL"}
+		f.Levels = parser.ErrorLevels
 	}
 	if f.PatternID == 0 {
 		f.From, f.To = &from, &to
@@ -89,7 +90,7 @@ func (s *Service) collect(ctx context.Context, a store.Anomaly) (Input, error) {
 
 	leadFrom := from.Add(-10 * time.Minute)
 	lead, err := s.Store.SearchLogs(ctx, store.LogFilter{
-		Service: a.Service, Levels: []string{"WARN", "ERROR", "FATAL"}, From: &leadFrom, To: &from, Limit: 10,
+		Service: a.Service, Levels: parser.AlertLevels, From: &leadFrom, To: &from, Limit: 10, SkipCount: true,
 	})
 	if err != nil {
 		return in, err

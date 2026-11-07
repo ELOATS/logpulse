@@ -3,14 +3,7 @@ package analyzer
 
 import (
 	"math"
-	"sort"
 )
-
-// Point 是某个时间桶的计数。
-type Point struct {
-	Index int     // 桶序号
-	Value float64 // 计数
-}
 
 // Spike 是检测到的突增点。
 type Spike struct {
@@ -23,38 +16,48 @@ type Spike struct {
 // DetectSpikes 在滑动基线上检测计数突增。
 //
 //   - baseline：用于计算基线的前序桶数量
-//   - threshold：等效 z 值阈值（4.5 约等于单侧 p = 3.4e-6）
+//   - threshold：等效 z 值阈值（5 约等于单侧 p = 2.9e-7）
 //   - minCount：观测值低于该值时忽略（避免极低流量下的零星事件）
 //
 // 日志计数是"事件数"，低流量时随机波动服从 Poisson 分布，远比正态分布的尾部重；
 // 直接用 (x-均值)/标准差 会在低流量下产生大量误报。因此这里：
-//  1. 用截尾均值估计基线（去掉窗口中最高的 10%，历史尖峰不会抬高基线）；
-//  2. 方差不超过均值时按 Poisson 计算尾部概率 P(X ≥ x)，方差更大（过度离散，
-//     即比 Poisson 更"抖"）时按同均值、同方差的负二项分布计算；
-//  3. 把尾部概率换算成等效 z 值，使阈值与严重级别仍可按 z 值理解。
+//  1. 用剔除离群点后的线性趋势估计基线（历史尖峰不会抬高基线，日周期也跟得上）；
+//  2. 方差不显著高于均值时按 Poisson 计算尾部概率 P(X ≥ x)，过度离散（比 Poisson
+//     更"抖"）时按同均值、同方差的负二项分布计算；
+//  3. 把尾部概率换算成等效 z 值，使阈值与严重级别仍可按 z 值理解；
+//  4. 同时检验 1、3、5 个桶的总和，发现"每个桶都不算太高、但持续了好几分钟"的故障。
 func DetectSpikes(series []float64, baseline int, threshold float64, minCount float64) []Spike {
 	if baseline < 3 {
 		baseline = 3
 	}
+	// 基线只取决于被检验区间的起点 from：k=3 在第 i 桶的基线就是 k=1 在第 i-2 桶的基线，
+	// 按起点缓存，每个起点只拟合一次
+	fits := make([]baselineFit, len(series))
+	fitted := make([]bool, len(series))
+	fitAt := func(from int) (baselineFit, int) {
+		w := series[max(from-baseline, 0):from]
+		if !fitted[from] {
+			fits[from], fitted[from] = fitBaseline(w), true
+		}
+		return fits[from], len(w)
+	}
 	var spikes []Spike
-	window := make([]float64, 0, baseline)
 	for i := range series {
 		x := math.Round(series[i])
 		best := Spike{Index: i, Observed: x}
-		// 多时间尺度：单个桶捕捉尖峰；连续 3、5 个桶的总和捕捉"每个桶都不算太高、
-		// 但持续了好几分钟"的故障——这在低流量服务上很常见，单桶检验发现不了
 		for _, k := range scales {
 			from := i - k + 1 // 本次检验覆盖的桶 [from, i]
-			start := from - baseline
-			if from < 0 || start < -baseline/2 {
+			if from < 0 || from-baseline < -baseline/2 {
 				continue // 历史不足一半基线时不做判断，防止冷启动误报
 			}
-			window = append(window[:0], series[max(start, 0):from]...)
-			fit := fitBaseline(window)
+			fit, n := fitAt(from)
+			if k > 1 && x <= fit.predict(n+k-1) {
+				break // 当前桶已恢复正常：不再用多桶窗口延长已结束的故障
+			}
 			// 预测被检验的 k 个桶的基线（沿趋势外推），并按 k 个桶求和
 			var mean, variance float64
 			for j := 0; j < k; j++ {
-				m := fit.predict(len(window) + j)
+				m := fit.predict(n + j)
 				mean += m
 				variance += math.Max(fit.variance, m) // 方差不低于 Poisson 方差
 			}
@@ -72,9 +75,6 @@ func DetectSpikes(series []float64, baseline int, threshold float64, minCount fl
 			}
 			if k > 1 {
 				sum -= top1 - top2
-			}
-			if k > 1 && x <= fit.predict(len(window)+k-1) {
-				break // 当前桶已恢复正常：不再用多桶窗口延长已结束的故障
 			}
 			if sum < minCount || sum <= mean {
 				continue
@@ -264,27 +264,6 @@ func Severity(score, threshold float64) string {
 		return "medium"
 	}
 	return "low"
-}
-
-func median(xs []float64) float64 {
-	if len(xs) == 0 {
-		return 0
-	}
-	s := append([]float64(nil), xs...)
-	sort.Float64s(s)
-	n := len(s)
-	if n%2 == 1 {
-		return s[n/2]
-	}
-	return (s[n/2-1] + s[n/2]) / 2
-}
-
-func medianAbsDev(xs []float64, med float64) float64 {
-	d := make([]float64, len(xs))
-	for i, x := range xs {
-		d[i] = math.Abs(x - med)
-	}
-	return median(d)
 }
 
 // Incident 是若干个相邻突增桶合并后的事件。

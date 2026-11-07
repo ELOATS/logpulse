@@ -135,7 +135,7 @@ func TestTimeseriesMatchesRaw(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				want, err := s.timeseriesRaw(ctx, f, b)
+				want, err := s.timeseries(ctx, f, b, false)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -211,4 +211,53 @@ func TestIngestLongMultibyteMessage(t *testing.T) {
 	if _, err := s.Ingest(context.Background(), []parser.Entry{e}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// overviewRaw 直接扫描 logs 表计算总览：独立实现，作为测试对照。
+func (s *Store) overviewRaw(ctx context.Context, from, to *time.Time) (Overview, error) {
+	o := Overview{Levels: map[string]int64{}, TopServices: []NameCount{}}
+	where, args := LogFilter{From: from, To: to}.where()
+	err := s.Pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE level IN ('ERROR','FATAL')),
+		count(DISTINCT service), min(ts), max(ts) FROM logs `+where, args...).
+		Scan(&o.TotalLogs, &o.ErrorLogs, &o.Services, &o.FirstLog, &o.LastLog)
+	if err != nil {
+		return o, err
+	}
+	if o.TotalLogs > 0 {
+		o.ErrorRate = float64(o.ErrorLogs) / float64(o.TotalLogs)
+	}
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM log_patterns`).Scan(&o.Patterns); err != nil {
+		return o, err
+	}
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM anomalies WHERE NOT acknowledged`).Scan(&o.OpenAnomalies); err != nil {
+		return o, err
+	}
+	rows, err := s.Pool.Query(ctx, `SELECT level, count(*) FROM logs `+where+` GROUP BY level`, args...)
+	if err != nil {
+		return o, err
+	}
+	for rows.Next() {
+		var l string
+		var c int64
+		if err := rows.Scan(&l, &c); err != nil {
+			rows.Close()
+			return o, err
+		}
+		o.Levels[l] = c
+	}
+	rows.Close()
+	rows, err = s.Pool.Query(ctx, `SELECT service, count(*), count(*) FILTER (WHERE level IN ('ERROR','FATAL'))
+		FROM logs `+where+` GROUP BY service ORDER BY count(*) DESC LIMIT 10`, args...)
+	if err != nil {
+		return o, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n NameCount
+		if err := rows.Scan(&n.Name, &n.Count, &n.Errors); err != nil {
+			return o, err
+		}
+		o.TopServices = append(o.TopServices, n)
+	}
+	return o, rows.Err()
 }

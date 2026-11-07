@@ -4,6 +4,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -140,6 +141,7 @@ type LogFilter struct {
 	From, To  *time.Time
 	Limit     int
 	Offset    int
+	SkipCount bool // 不统计总数（只需要样例时）
 }
 
 type LogRow struct {
@@ -166,41 +168,39 @@ type LogPage struct {
 // 而界面只需要知道"有很多"。翻页超过上限时会相应提高。
 const countCap = 10000
 
+// where 返回 WHERE 子句与参数。
 func (f LogFilter) where() (string, []any) {
+	var b sqlBuilder
+	w := f.build(&b)
+	return w, b.args
+}
+
+// build 用 b 编号参数，返回 WHERE 子句（可与其他使用同一 b 的片段拼接）。
+func (f LogFilter) build(b *sqlBuilder) string {
 	var conds []string
-	var args []any
-	add := func(cond string, v any) {
-		args = append(args, v)
-		conds = append(conds, strings.ReplaceAll(cond, "?", fmt.Sprintf("$%d", len(args))))
-	}
 	if q := strings.TrimSpace(f.Query); q != "" {
 		// 全文检索 + 子串匹配兜底（全文检索对符号、路径等不敏感）
-		args = append(args, q, "%"+escapeLike(q)+"%")
-		n := len(args)
-		conds = append(conds, fmt.Sprintf("(search @@ websearch_to_tsquery('simple', $%d) OR message ILIKE $%d)", n-1, n))
+		conds = append(conds, b.cond("(search @@ websearch_to_tsquery('simple', ?) OR message ILIKE ?)", q, "%"+escapeLike(q)+"%"))
 	}
 	if len(f.Levels) > 0 {
-		add("level = ANY(?)", f.Levels)
+		conds = append(conds, b.cond("level = ANY(?)", f.Levels))
 	}
 	if f.Service != "" {
-		add("service = ?", f.Service)
+		conds = append(conds, b.cond("service = ?", f.Service))
 	}
 	if f.Host != "" {
-		add("host = ?", f.Host)
+		conds = append(conds, b.cond("host = ?", f.Host))
 	}
 	if f.PatternID > 0 {
-		add("pattern_id = ?", f.PatternID)
+		conds = append(conds, b.cond("pattern_id = ?", f.PatternID))
 	}
 	if f.From != nil {
-		add("ts >= ?", *f.From)
+		conds = append(conds, b.cond("ts >= ?", *f.From))
 	}
 	if f.To != nil {
-		add("ts < ?", *f.To)
+		conds = append(conds, b.cond("ts < ?", *f.To))
 	}
-	if len(conds) == 0 {
-		return "", args
-	}
-	return "WHERE " + strings.Join(conds, " AND "), args
+	return where(conds)
 }
 
 func escapeLike(s string) string {
@@ -208,34 +208,37 @@ func escapeLike(s string) string {
 }
 
 func (s *Store) SearchLogs(ctx context.Context, f LogFilter) (LogPage, error) {
-	if f.Limit <= 0 || f.Limit > 500 {
-		f.Limit = 100
-	}
-	where, args := f.where()
+	f.Limit = clampLimit(f.Limit, 100, 500)
+	var b sqlBuilder
+	w := f.build(&b)
 	page := LogPage{Items: []LogRow{}}
 	limit := int64(max(countCap, f.Offset+f.Limit))
-	if err := s.Pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM (SELECT 1 FROM logs %s LIMIT %d) t", where, limit+1), args...).Scan(&page.Total); err != nil {
+	countSQL := fmt.Sprintf("SELECT count(*) FROM (SELECT 1 FROM logs %s LIMIT %d) t", w, limit+1)
+	pageSQL := fmt.Sprintf(`SELECT id, ts, level, service, host, message, raw, format, attributes, pattern_id
+		FROM logs %s ORDER BY ts DESC, id DESC LIMIT %d OFFSET %d`, w, f.Limit, f.Offset)
+
+	batch := &pgx.Batch{}
+	if !f.SkipCount {
+		batch.Queue(countSQL, b.args...).QueryRow(func(r pgx.Row) error { return r.Scan(&page.Total) })
+	}
+	batch.Queue(pageSQL, b.args...).Query(func(rows pgx.Rows) error {
+		var err error
+		page.Items, err = pgx.CollectRows(rows, pgx.RowToStructByPos[LogRow])
+		return err
+	})
+	if err := s.Pool.SendBatch(ctx, batch).Close(); err != nil {
 		return page, err
 	}
 	if page.Total > limit {
 		page.Total, page.TotalCapped = limit, true
 	}
-	args = append(args, f.Limit, f.Offset)
-	q := fmt.Sprintf(`SELECT id, ts, level, service, host, message, raw, format, attributes, pattern_id
-		FROM logs %s ORDER BY ts DESC, id DESC LIMIT $%d OFFSET $%d`, where, len(args)-1, len(args))
-	rows, err := s.Pool.Query(ctx, q, args...)
-	if err != nil {
-		return page, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var r LogRow
-		if err := rows.Scan(&r.ID, &r.Timestamp, &r.Level, &r.Service, &r.Host, &r.Message, &r.Raw, &r.Format, &r.Attributes, &r.PatternID); err != nil {
-			return page, err
-		}
-		page.Items = append(page.Items, r)
-	}
-	return page, rows.Err()
+	return page, nil
+}
+
+// DataRange 返回最早与最晚一条日志的时间（没有日志时为 nil）。
+func (s *Store) DataRange(ctx context.Context) (minTS, maxTS *time.Time, err error) {
+	err = s.Pool.QueryRow(ctx, `SELECT min(ts), max(ts) FROM logs`).Scan(&minTS, &maxTS)
+	return minTS, maxTS, err
 }
 
 // ---------- 统计 ----------
@@ -259,55 +262,6 @@ type NameCount struct {
 	Errors int64  `json:"errors"`
 }
 
-// overviewRaw 直接扫描 logs 表计算总览（仅用于测试对照）。
-func (s *Store) overviewRaw(ctx context.Context, from, to *time.Time) (Overview, error) {
-	o := Overview{Levels: map[string]int64{}, TopServices: []NameCount{}}
-	where, args := LogFilter{From: from, To: to}.where()
-	err := s.Pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE level IN ('ERROR','FATAL')),
-		count(DISTINCT service), min(ts), max(ts) FROM logs `+where, args...).
-		Scan(&o.TotalLogs, &o.ErrorLogs, &o.Services, &o.FirstLog, &o.LastLog)
-	if err != nil {
-		return o, err
-	}
-	if o.TotalLogs > 0 {
-		o.ErrorRate = float64(o.ErrorLogs) / float64(o.TotalLogs)
-	}
-	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM log_patterns`).Scan(&o.Patterns); err != nil {
-		return o, err
-	}
-	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM anomalies WHERE NOT acknowledged`).Scan(&o.OpenAnomalies); err != nil {
-		return o, err
-	}
-	rows, err := s.Pool.Query(ctx, `SELECT level, count(*) FROM logs `+where+` GROUP BY level`, args...)
-	if err != nil {
-		return o, err
-	}
-	for rows.Next() {
-		var l string
-		var c int64
-		if err := rows.Scan(&l, &c); err != nil {
-			rows.Close()
-			return o, err
-		}
-		o.Levels[l] = c
-	}
-	rows.Close()
-	rows, err = s.Pool.Query(ctx, `SELECT service, count(*), count(*) FILTER (WHERE level IN ('ERROR','FATAL'))
-		FROM logs `+where+` GROUP BY service ORDER BY count(*) DESC LIMIT 10`, args...)
-	if err != nil {
-		return o, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var n NameCount
-		if err := rows.Scan(&n.Name, &n.Count, &n.Errors); err != nil {
-			return o, err
-		}
-		o.TopServices = append(o.TopServices, n)
-	}
-	return o, rows.Err()
-}
-
 type TimePoint struct {
 	Bucket time.Time `json:"bucket"`
 	Total  int64     `json:"total"`
@@ -315,51 +269,12 @@ type TimePoint struct {
 	Warns  int64     `json:"warns"`
 }
 
-// timeseriesRaw 直接扫描 logs 表按时间桶聚合（带全文检索、主机、模式等条件时使用）。
-func (s *Store) timeseriesRaw(ctx context.Context, f LogFilter, bucket time.Duration) ([]TimePoint, error) {
-	if bucket < time.Second {
-		bucket = time.Minute
-	}
-	where, args := f.where()
-	args = append(args, bucket.Seconds())
-	n := len(args)
-	q := fmt.Sprintf(`SELECT to_timestamp(floor(extract(epoch FROM ts) / $%d) * $%d) AS b,
-			count(*),
-			count(*) FILTER (WHERE level IN ('ERROR','FATAL')),
-			count(*) FILTER (WHERE level = 'WARN')
-		FROM logs %s GROUP BY b ORDER BY b`, n, n, where)
-	rows, err := s.Pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []TimePoint{}
-	for rows.Next() {
-		var p TimePoint
-		if err := rows.Scan(&p.Bucket, &p.Total, &p.Errors, &p.Warns); err != nil {
-			return nil, err
-		}
-		p.Bucket = p.Bucket.UTC()
-		out = append(out, p)
-	}
-	return out, rows.Err()
-}
-
 func (s *Store) Services(ctx context.Context) ([]string, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT DISTINCT service FROM log_patterns ORDER BY service`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []string{}
-	for rows.Next() {
-		var sv string
-		if err := rows.Scan(&sv); err != nil {
-			return nil, err
-		}
-		out = append(out, sv)
-	}
-	return out, rows.Err()
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // ---------- 模式 ----------
@@ -376,58 +291,69 @@ type Pattern struct {
 }
 
 type PatternFilter struct {
-	Service string
-	Level   string
-	Query   string
-	Sort    string // count | recent | new
-	Limit   int
+	Service        string
+	Level          string
+	Levels         []string
+	Query          string
+	FirstSeenSince *time.Time
+	Sort           string // count | recent | new
+	Limit          int
 }
 
 func (s *Store) Patterns(ctx context.Context, f PatternFilter) ([]Pattern, error) {
-	if f.Limit <= 0 || f.Limit > 500 {
-		f.Limit = 100
-	}
+	var b sqlBuilder
 	var conds []string
-	var args []any
 	if f.Service != "" {
-		args = append(args, f.Service)
-		conds = append(conds, fmt.Sprintf("service = $%d", len(args)))
+		conds = append(conds, b.cond("service = ?", f.Service))
 	}
 	if f.Level != "" {
-		args = append(args, f.Level)
-		conds = append(conds, fmt.Sprintf("level = $%d", len(args)))
+		conds = append(conds, b.cond("level = ?", f.Level))
+	}
+	if len(f.Levels) > 0 {
+		conds = append(conds, b.cond("level = ANY(?)", f.Levels))
 	}
 	if f.Query != "" {
-		args = append(args, "%"+escapeLike(f.Query)+"%")
-		conds = append(conds, fmt.Sprintf("(template ILIKE $%d OR sample ILIKE $%d)", len(args), len(args)))
+		like := b.arg("%" + escapeLike(f.Query) + "%")
+		conds = append(conds, "(template ILIKE "+like+" OR sample ILIKE "+like+")")
 	}
-	where := ""
-	if len(conds) > 0 {
-		where = "WHERE " + strings.Join(conds, " AND ")
+	if f.FirstSeenSince != nil {
+		conds = append(conds, b.cond("first_seen >= ?", *f.FirstSeenSince))
 	}
-	order := "count DESC"
-	switch f.Sort {
-	case "recent":
-		order = "last_seen DESC"
-	case "new":
-		order = "first_seen DESC"
+	order := map[string]string{"recent": "last_seen DESC", "new": "first_seen DESC"}[f.Sort]
+	if order == "" {
+		order = "count DESC"
 	}
-	args = append(args, f.Limit)
 	rows, err := s.Pool.Query(ctx, fmt.Sprintf(`SELECT id, service, level, template, sample, count, first_seen, last_seen
-		FROM log_patterns %s ORDER BY %s, id LIMIT $%d`, where, order, len(args)), args...)
+		FROM log_patterns %s ORDER BY %s, id LIMIT %d`, where(conds), order, clampLimit(f.Limit, 100, 500)), b.args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []Pattern{}
-	for rows.Next() {
-		var p Pattern
-		if err := rows.Scan(&p.ID, &p.Service, &p.Level, &p.Template, &p.Sample, &p.Count, &p.FirstSeen, &p.LastSeen); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[Pattern])
+}
+
+// PatternCount 是某个时间窗口内一个模式的日志数。
+type PatternCount struct {
+	PatternID int64  `json:"pattern_id"`
+	Template  string `json:"template"`
+	Level     string `json:"level"`
+	Count     int64  `json:"count"`
+}
+
+// TopPatterns 返回服务在 [from, to) 内日志数最多的模式（levels 为空表示所有级别），作为根因线索。
+func (s *Store) TopPatterns(ctx context.Context, service string, from, to time.Time, levels []string, limit int) ([]PatternCount, error) {
+	var b sqlBuilder
+	conds := []string{b.cond("l.service = ?", service), b.cond("l.ts >= ?", from), b.cond("l.ts < ?", to)}
+	if len(levels) > 0 {
+		conds = append(conds, b.cond("l.level = ANY(?)", levels))
 	}
-	return out, rows.Err()
+	rows, err := s.Pool.Query(ctx, fmt.Sprintf(`
+		SELECT p.id, p.template, p.level, count(*)
+		FROM logs l JOIN log_patterns p ON p.id = l.pattern_id
+		%s GROUP BY p.id, p.template, p.level ORDER BY count(*) DESC LIMIT %d`, where(conds), limit), b.args...)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[PatternCount])
 }
 
 // ---------- 异常 ----------
@@ -458,12 +384,13 @@ const anomalyColumns = `id, kind, severity, service, pattern_id, window_start, w
 	score, observed, expected, description, details, acknowledged, created_at,
 	ai_insight, ai_model, ai_error, ai_generated_at`
 
-func scanAnomaly(row pgx.Row) (Anomaly, error) {
-	var a Anomaly
-	err := row.Scan(&a.ID, &a.Kind, &a.Severity, &a.Service, &a.PatternID, &a.WindowStart, &a.WindowEnd,
-		&a.Score, &a.Observed, &a.Expected, &a.Description, &a.Details, &a.Acknowledged, &a.CreatedAt,
-		&a.AIInsight, &a.AIModel, &a.AIError, &a.AIGeneratedAt)
-	return a, err
+// queryAnomalies 执行返回 anomalyColumns 的查询（列顺序与 Anomaly 字段顺序一致）。
+func (s *Store) queryAnomalies(ctx context.Context, sql string, args ...any) ([]Anomaly, error) {
+	rows, err := s.Pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[Anomaly])
 }
 
 // UpsertAnomaly 按 dedup_key 去重写入，返回是否为新异常。
@@ -479,9 +406,15 @@ func (s *Store) UpsertAnomaly(ctx context.Context, key string, a Anomaly) (bool,
 		ON CONFLICT (dedup_key) DO UPDATE SET
 			severity = EXCLUDED.severity, score = EXCLUDED.score, observed = EXCLUDED.observed,
 			expected = EXCLUDED.expected, description = EXCLUDED.description, details = EXCLUDED.details
+		-- 每轮检测都会重新写入回溯窗口内的所有异常；内容没变时不更新，避免无谓的行版本与表膨胀
+		WHERE (anomalies.severity, anomalies.score, anomalies.observed, anomalies.expected, anomalies.description, anomalies.details)
+			IS DISTINCT FROM (EXCLUDED.severity, EXCLUDED.score, EXCLUDED.observed, EXCLUDED.expected, EXCLUDED.description, EXCLUDED.details)
 		RETURNING (xmax = 0)`,
 		key, a.Kind, a.Severity, a.Service, a.PatternID, a.WindowStart, a.WindowEnd,
 		a.Score, a.Observed, a.Expected, a.Description, string(a.Details)).Scan(&inserted)
+	if errors.Is(err, pgx.ErrNoRows) { // 内容未变，未更新
+		return false, nil
+	}
 	return inserted, err
 }
 
@@ -495,55 +428,30 @@ type AnomalyFilter struct {
 }
 
 func (s *Store) Anomalies(ctx context.Context, f AnomalyFilter) ([]Anomaly, error) {
-	if f.Limit <= 0 || f.Limit > 500 {
-		f.Limit = 100
-	}
+	var b sqlBuilder
 	var conds []string
-	var args []any
-	add := func(col string, v any) {
-		args = append(args, v)
-		conds = append(conds, fmt.Sprintf("%s = $%d", col, len(args)))
-	}
-	if f.Kind != "" {
-		add("kind", f.Kind)
-	}
-	if f.Severity != "" {
-		add("severity", f.Severity)
-	}
-	if f.Service != "" {
-		add("service", f.Service)
+	for _, c := range []struct{ col, v string }{{"kind", f.Kind}, {"severity", f.Severity}, {"service", f.Service}} {
+		if c.v != "" {
+			conds = append(conds, b.cond(c.col+" = ?", c.v))
+		}
 	}
 	if f.Acknowledged != nil {
-		add("acknowledged", *f.Acknowledged)
+		conds = append(conds, b.cond("acknowledged = ?", *f.Acknowledged))
 	}
-	where := ""
-	if len(conds) > 0 {
-		where = "WHERE " + strings.Join(conds, " AND ")
-	}
-	args = append(args, f.Limit)
 	order := "window_start DESC, score DESC"
 	if f.Sort == "severity" {
-		order = "CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, window_start DESC, score DESC"
+		order = "CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, " + order
 	}
-	rows, err := s.Pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM anomalies %s
-		ORDER BY %s LIMIT $%d`, anomalyColumns, where, order, len(args)), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Anomaly{}
-	for rows.Next() {
-		a, err := scanAnomaly(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
+	return s.queryAnomalies(ctx, fmt.Sprintf(`SELECT %s FROM anomalies %s ORDER BY %s LIMIT %d`,
+		anomalyColumns, where(conds), order, clampLimit(f.Limit, 100, 500)), b.args...)
 }
 
 func (s *Store) GetAnomaly(ctx context.Context, id int64) (Anomaly, error) {
-	return scanAnomaly(s.Pool.QueryRow(ctx, `SELECT `+anomalyColumns+` FROM anomalies WHERE id = $1`, id))
+	rows, err := s.Pool.Query(ctx, `SELECT `+anomalyColumns+` FROM anomalies WHERE id = $1`, id)
+	if err != nil {
+		return Anomaly{}, err
+	}
+	return pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[Anomaly])
 }
 
 // SaveInsight 保存大模型分析结果；errMsg 非空表示生成失败。
@@ -562,22 +470,9 @@ func (s *Store) SaveInsight(ctx context.Context, id int64, insight any, model, e
 
 // PendingInsights 返回尚未生成（也未失败过）分析的未确认中/高危异常，严重者优先。
 func (s *Store) PendingInsights(ctx context.Context, limit int) ([]Anomaly, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT `+anomalyColumns+` FROM anomalies
+	return s.queryAnomalies(ctx, `SELECT `+anomalyColumns+` FROM anomalies
 		WHERE ai_generated_at IS NULL AND NOT acknowledged AND severity IN ('medium', 'high')
 		ORDER BY (severity = 'high') DESC, window_start DESC LIMIT $1`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Anomaly
-	for rows.Next() {
-		a, err := scanAnomaly(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
 }
 
 func (s *Store) AckAnomaly(ctx context.Context, id int64, ack bool) error {

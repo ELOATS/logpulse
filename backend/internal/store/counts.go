@@ -69,19 +69,15 @@ func ceilMinute(t time.Time) time.Time {
 
 // countSource 构造一个子查询，输出列 (t, service, level, c)：
 // 整分钟部分来自 log_counts（t 为分钟起点，c 为计数），首尾零头来自 logs（t 为日志时间，c = 1）。
-func countSource(from, to *time.Time, service string, levels []string, args *[]any) string {
-	add := func(v any) string {
-		*args = append(*args, v)
-		return fmt.Sprintf("$%d", len(*args))
-	}
+func countSource(b *sqlBuilder, from, to *time.Time, service string, levels []string) string {
 	var conds, rawConds, edges []string
 	if service != "" {
-		p := add(service)
+		p := b.arg(service)
 		conds = append(conds, "service = "+p)
 		rawConds = append(rawConds, "service = "+p)
 	}
 	if len(levels) > 0 {
-		p := add(levels)
+		p := b.arg(levels)
 		conds = append(conds, "level = ANY("+p+")")
 		rawConds = append(rawConds, "level = ANY("+p+")")
 	}
@@ -89,27 +85,24 @@ func countSource(from, to *time.Time, service string, levels []string, args *[]a
 	case from != nil && to != nil && !ceilMinute(*from).Before(to.Truncate(time.Minute)):
 		// 范围不足以包含任何整分钟：全部读原始日志
 		conds = append(conds, "false")
-		edges = append(edges, fmt.Sprintf("(ts >= %s AND ts < %s)", add(*from), add(*to)))
+		edges = append(edges, b.cond("(ts >= ? AND ts < ?)", *from, *to))
 	default:
 		if from != nil {
 			fc := ceilMinute(*from)
-			conds = append(conds, "bucket >= "+add(fc))
+			conds = append(conds, b.cond("bucket >= ?", fc))
 			if !fc.Equal(*from) {
-				edges = append(edges, fmt.Sprintf("(ts >= %s AND ts < %s)", add(*from), add(fc)))
+				edges = append(edges, b.cond("(ts >= ? AND ts < ?)", *from, fc))
 			}
 		}
 		if to != nil {
 			tf := to.Truncate(time.Minute)
-			conds = append(conds, "bucket < "+add(tf))
+			conds = append(conds, b.cond("bucket < ?", tf))
 			if !tf.Equal(*to) {
-				edges = append(edges, fmt.Sprintf("(ts >= %s AND ts < %s)", add(tf), add(*to)))
+				edges = append(edges, b.cond("(ts >= ? AND ts < ?)", tf, *to))
 			}
 		}
 	}
-	q := "SELECT bucket AS t, service, level, count AS c FROM log_counts"
-	if len(conds) > 0 {
-		q += " WHERE " + strings.Join(conds, " AND ")
-	}
+	q := "SELECT bucket AS t, service, level, count AS c FROM log_counts " + where(conds)
 	if len(edges) > 0 {
 		q += " UNION ALL SELECT ts, service, level, 1 FROM logs WHERE (" + strings.Join(edges, " OR ") + ")"
 		for _, c := range rawConds {
@@ -119,40 +112,62 @@ func countSource(from, to *time.Time, service string, levels []string, args *[]a
 	return q
 }
 
-// Overview 计算总览统计（读预聚合表，耗时与日志总量无关）。
+// rawSource 是与 countSource 同形状 (t, service, level, c) 的原始日志子查询。
+func rawSource(b *sqlBuilder, f LogFilter) string {
+	return "SELECT ts AS t, service, level, 1 AS c FROM logs " + f.build(b)
+}
+
+// wholeMinutes 判断时间桶是否为整分钟（才能由按分钟预聚合的计数回答）。
+func wholeMinutes(bucket time.Duration) bool {
+	return bucket >= time.Minute && bucket%time.Minute == 0
+}
+
+// usesCounts 判断查询能否由预聚合表回答：只按时间、服务、级别过滤，且时间桶为整分钟。
+func usesCounts(f LogFilter, bucket time.Duration) bool {
+	return f.Query == "" && f.Host == "" && f.PatternID == 0 && wholeMinutes(bucket)
+}
+
+// Overview 计算总览统计（读预聚合表，耗时与日志总量无关）。三个查询在一次往返中完成。
 func (s *Store) Overview(ctx context.Context, from, to *time.Time) (Overview, error) {
 	o := Overview{Levels: map[string]int64{}, TopServices: []NameCount{}}
-	var args []any
-	src := countSource(from, to, "", nil, &args)
-	rows, err := s.Pool.Query(ctx, `SELECT service, level, sum(c)::bigint FROM (`+src+`) s GROUP BY 1, 2`, args...)
-	if err != nil {
-		return o, err
-	}
 	bySvc := map[string]*NameCount{}
-	for rows.Next() {
+
+	var cb sqlBuilder
+	src := countSource(&cb, from, to, "", nil)
+	// 最早/最晚时间需精确到毫秒：min/max 走 ts 索引，只读首尾各一行
+	rangeWhere, rangeArgs := LogFilter{From: from, To: to}.where()
+
+	batch := &pgx.Batch{}
+	batch.Queue(`SELECT service, level, sum(c)::bigint FROM (`+src+`) s GROUP BY 1, 2`, cb.args...).Query(func(rows pgx.Rows) error {
 		var svc, lvl string
 		var n int64
-		if err := rows.Scan(&svc, &lvl, &n); err != nil {
-			rows.Close()
-			return o, err
-		}
-		o.TotalLogs += n
-		o.Levels[lvl] += n
-		nc, ok := bySvc[svc]
-		if !ok {
-			nc = &NameCount{Name: svc}
-			bySvc[svc] = nc
-		}
-		nc.Count += n
-		if lvl == "ERROR" || lvl == "FATAL" {
-			o.ErrorLogs += n
-			nc.Errors += n
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+		_, err := pgx.ForEachRow(rows, []any{&svc, &lvl, &n}, func() error {
+			o.TotalLogs += n
+			o.Levels[lvl] += n
+			nc, ok := bySvc[svc]
+			if !ok {
+				nc = &NameCount{Name: svc}
+				bySvc[svc] = nc
+			}
+			nc.Count += n
+			if parser.IsError(lvl) {
+				o.ErrorLogs += n
+				nc.Errors += n
+			}
+			return nil
+		})
+		return err
+	})
+	batch.Queue(`SELECT min(ts), max(ts) FROM logs `+rangeWhere, rangeArgs...).QueryRow(func(r pgx.Row) error {
+		return r.Scan(&o.FirstLog, &o.LastLog)
+	})
+	batch.Queue(`SELECT (SELECT count(*) FROM log_patterns), (SELECT count(*) FROM anomalies WHERE NOT acknowledged)`).QueryRow(func(r pgx.Row) error {
+		return r.Scan(&o.Patterns, &o.OpenAnomalies)
+	})
+	if err := s.Pool.SendBatch(ctx, batch).Close(); err != nil {
 		return o, err
 	}
+
 	o.Services = int64(len(bySvc))
 	if o.TotalLogs > 0 {
 		o.ErrorRate = float64(o.ErrorLogs) / float64(o.TotalLogs)
@@ -170,55 +185,38 @@ func (s *Store) Overview(ctx context.Context, from, to *time.Time) (Overview, er
 	if len(o.TopServices) > 10 {
 		o.TopServices = o.TopServices[:10]
 	}
-
-	// 最早/最晚时间需精确到毫秒：min/max 走 ts 索引，只读首尾各一行
-	where, wargs := LogFilter{From: from, To: to}.where()
-	if err := s.Pool.QueryRow(ctx, `SELECT min(ts), max(ts) FROM logs `+where, wargs...).Scan(&o.FirstLog, &o.LastLog); err != nil {
-		return o, err
-	}
-	if err := s.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM log_patterns), (SELECT count(*) FROM anomalies WHERE NOT acknowledged)`).
-		Scan(&o.Patterns, &o.OpenAnomalies); err != nil {
-		return o, err
-	}
 	return o, nil
-}
-
-// usesCounts 判断查询能否由预聚合表回答：只按时间、服务、级别过滤，且时间桶为整分钟。
-func usesCounts(f LogFilter, bucket time.Duration) bool {
-	return f.Query == "" && f.Host == "" && f.PatternID == 0 && bucket >= time.Minute && bucket%time.Minute == 0
 }
 
 // Timeseries 按时间桶聚合日志量；能用预聚合表时读预聚合表，否则扫描原始日志。
 func (s *Store) Timeseries(ctx context.Context, f LogFilter, bucket time.Duration) ([]TimePoint, error) {
+	return s.timeseries(ctx, f, bucket, usesCounts(f, bucket))
+}
+
+func (s *Store) timeseries(ctx context.Context, f LogFilter, bucket time.Duration, fromCounts bool) ([]TimePoint, error) {
 	if bucket < time.Second {
 		bucket = time.Minute
 	}
-	if !usesCounts(f, bucket) {
-		return s.timeseriesRaw(ctx, f, bucket)
+	var b sqlBuilder
+	src := rawSource(&b, f)
+	if fromCounts {
+		b = sqlBuilder{}
+		src = countSource(&b, f.From, f.To, f.Service, f.Levels)
 	}
-	var args []any
-	src := countSource(f.From, f.To, f.Service, f.Levels, &args)
-	args = append(args, bucket.Seconds())
-	b := fmt.Sprintf("$%d", len(args))
-	rows, err := s.Pool.Query(ctx, `SELECT to_timestamp(floor(extract(epoch FROM t) / `+b+`) * `+b+`) AS b,
+	bs := b.arg(bucket.Seconds())
+	rows, err := s.Pool.Query(ctx, `SELECT to_timestamp(floor(extract(epoch FROM t) / `+bs+`) * `+bs+`) AS b,
 			sum(c)::bigint,
-			coalesce(sum(c) FILTER (WHERE level IN ('ERROR','FATAL')), 0)::bigint,
+			coalesce(sum(c) FILTER (WHERE `+errorLevelSQL+`), 0)::bigint,
 			coalesce(sum(c) FILTER (WHERE level = 'WARN'), 0)::bigint
-		FROM (`+src+`) s GROUP BY b ORDER BY b`, args...)
+		FROM (`+src+`) s GROUP BY b ORDER BY b`, b.args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []TimePoint{}
-	for rows.Next() {
-		var p TimePoint
-		if err := rows.Scan(&p.Bucket, &p.Total, &p.Errors, &p.Warns); err != nil {
-			return nil, err
-		}
-		p.Bucket = p.Bucket.UTC()
-		out = append(out, p)
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[TimePoint])
+	for i := range out {
+		out[i].Bucket = out[i].Bucket.UTC()
 	}
-	return out, rows.Err()
+	return out, err
 }
 
 // SeriesRow 是异常检测用的 (服务, 桶序号) 计数。
@@ -230,32 +228,21 @@ type SeriesRow struct {
 
 // CountSeries 返回 [from, to) 内每个服务、每个时间桶的日志量与错误数，桶序号从 from 起算。
 func (s *Store) CountSeries(ctx context.Context, from, to time.Time, bucket time.Duration) ([]SeriesRow, error) {
-	var args []any
+	var b sqlBuilder
 	var src string
-	if bucket >= time.Minute && bucket%time.Minute == 0 {
-		src = countSource(&from, &to, "", nil, &args)
+	if wholeMinutes(bucket) {
+		src = countSource(&b, &from, &to, "", nil)
 	} else {
-		args = append(args, from, to)
-		src = "SELECT ts AS t, service, level, 1 AS c FROM logs WHERE ts >= $1 AND ts < $2"
+		src = rawSource(&b, LogFilter{From: &from, To: &to})
 	}
-	args = append(args, from, bucket.Seconds())
-	f, b := fmt.Sprintf("$%d", len(args)-1), fmt.Sprintf("$%d", len(args))
+	f, bs := b.arg(from), b.arg(bucket.Seconds())
 	rows, err := s.Pool.Query(ctx, `SELECT service,
-			floor(extract(epoch FROM t - `+f+`::timestamptz) / `+b+`)::int AS idx,
+			floor(extract(epoch FROM t - `+f+`::timestamptz) / `+bs+`)::int AS idx,
 			sum(c)::bigint,
-			coalesce(sum(c) FILTER (WHERE level IN ('ERROR','FATAL')), 0)::bigint
-		FROM (`+src+`) s GROUP BY 1, 2`, args...)
+			coalesce(sum(c) FILTER (WHERE `+errorLevelSQL+`), 0)::bigint
+		FROM (`+src+`) s GROUP BY 1, 2`, b.args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []SeriesRow
-	for rows.Next() {
-		var r SeriesRow
-		if err := rows.Scan(&r.Service, &r.Index, &r.Total, &r.Errors); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[SeriesRow])
 }

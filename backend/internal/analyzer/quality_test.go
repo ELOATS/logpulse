@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -184,4 +185,26 @@ func TestDetectorQuality(t *testing.T) {
 			t.Errorf("%s: 3 倍故障检出率 %.0f%%，低于 70%%", name, q.recall[3]*100)
 		}
 	}
+}
+
+// median / medianAbsDev 仅供旧算法对照使用。
+func median(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	s := append([]float64(nil), xs...)
+	sort.Float64s(s)
+	n := len(s)
+	if n%2 == 1 {
+		return s[n/2]
+	}
+	return (s[n/2-1] + s[n/2]) / 2
+}
+
+func medianAbsDev(xs []float64, med float64) float64 {
+	d := make([]float64, len(xs))
+	for i, x := range xs {
+		d[i] = math.Abs(x - med)
+	}
+	return median(d)
 }

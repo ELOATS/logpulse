@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/eloats/logpulse/backend/internal/parser"
@@ -27,9 +28,15 @@ type Analyzer struct {
 	log     *slog.Logger
 	trigger chan struct{}
 
-	// AfterRun 在每轮检测成功后调用（例如生成大模型摘要），可为空。
-	AfterRun func(ctx context.Context)
+	// AfterRun 在每轮检测成功后异步调用（例如生成大模型摘要），可为空。
+	// 不阻塞下一轮检测；上一次尚未结束时跳过本次。
+	AfterRun     func(ctx context.Context)
+	afterRunning atomic.Bool
 }
+
+// minTriggerGap 是由写入触发的两次检测之间的最小间隔：持续写入时，每个请求都会
+// Trigger，但没必要每个请求都重新分析一遍整个回溯窗口。
+const minTriggerGap = 10 * time.Second
 
 func New(s *store.Store, opts Options, log *slog.Logger) *Analyzer {
 	if opts.Bucket <= 0 {
@@ -62,12 +69,9 @@ type Result struct {
 func (a *Analyzer) Run(ctx context.Context) (Result, error) {
 	started := time.Now()
 	var res Result
-	var minTS, maxTS *time.Time
-	if err := a.store.Pool.QueryRow(ctx, `SELECT min(ts), max(ts) FROM logs`).Scan(&minTS, &maxTS); err != nil {
+	minTS, maxTS, err := a.store.DataRange(ctx)
+	if err != nil || maxTS == nil {
 		return res, err
-	}
-	if maxTS == nil {
-		return res, nil
 	}
 	b := a.opts.Bucket
 	to := maxTS.Truncate(b).Add(b)
@@ -77,64 +81,66 @@ func (a *Analyzer) Run(ctx context.Context) (Result, error) {
 	}
 	res.From, res.To = from, to
 
+	record := func(key string, an store.Anomaly) error {
+		inserted, err := a.store.UpsertAnomaly(ctx, key, an)
+		if err != nil {
+			return err
+		}
+		res.Detected++
+		if inserted {
+			res.NewAnomalies++
+		}
+		return nil
+	}
+
 	series, err := a.loadSeries(ctx, from, to)
 	if err != nil {
 		return res, err
 	}
 	res.Services = len(series)
-	n := int(to.Sub(from) / b)
-
 	for service, s := range series {
 		for _, check := range []struct {
 			kind   string
 			values []float64
 			label  string
+			levels []string // 根因线索只统计这些级别（nil 表示全部）
 		}{
-			{"error_spike", s.errors, "错误日志"},
-			{"volume_spike", s.total, "日志量"},
+			{"error_spike", s.errors, "错误日志", parser.ErrorLevels},
+			{"volume_spike", s.total, "日志量", nil},
 		} {
-			spikes := DetectSpikes(check.values[:n], a.opts.BaselineBuckets, a.opts.ZThreshold, float64(a.opts.MinCount))
+			spikes := DetectSpikes(check.values, a.opts.BaselineBuckets, a.opts.ZThreshold, float64(a.opts.MinCount))
 			for _, inc := range MergeSpikes(spikes, 2) {
-				inc.Recount(check.values[:n])
+				inc.Recount(check.values)
 				ws, we := from.Add(time.Duration(inc.Start)*b), from.Add(time.Duration(inc.End)*b)
+				top, err := a.store.TopPatterns(ctx, service, ws, we, check.levels, 5)
+				if err != nil {
+					return res, err
+				}
 				an := store.Anomaly{
 					Kind: check.kind, Severity: Severity(inc.Score, a.opts.ZThreshold), Service: service,
 					WindowStart: ws, WindowEnd: we, Score: inc.Score, Observed: inc.Observed, Expected: inc.Expected,
 					Description: fmt.Sprintf("服务 %s 的%s在 %s ~ %s 期间突增：共 %.0f 条，基线约 %.0f 条（峰值 z=%.1f）",
 						parser.DisplayService(service), check.label, ws.Format("01-02 15:04"), we.Format("15:04"), inc.Observed, inc.Expected, inc.Score),
 				}
-				onlyErrors := check.kind == "error_spike"
-				top, err := a.topPatterns(ctx, service, ws, we, onlyErrors)
-				if err != nil {
-					return res, err
-				}
 				an.Details, _ = json.Marshal(map[string]any{"top_patterns": top})
-				key := fmt.Sprintf("%s:%s:%d", check.kind, service, ws.Unix())
-				inserted, err := a.store.UpsertAnomaly(ctx, key, an)
-				if err != nil {
+				if err := record(fmt.Sprintf("%s:%s:%d", check.kind, service, ws.Unix()), an); err != nil {
 					return res, err
-				}
-				res.Detected++
-				if inserted {
-					res.NewAnomalies++
 				}
 			}
 		}
 	}
 
 	// 新出现的错误/告警模式：只在系统已有足够历史之后才算"新"
-	warmup := minTS.Add(time.Duration(a.opts.BaselineBuckets) * b)
-	newPatterns, err := a.newPatterns(ctx, maxTime(from, warmup))
+	since := maxTime(from, minTS.Add(time.Duration(a.opts.BaselineBuckets)*b))
+	newPatterns, err := a.store.Patterns(ctx, store.PatternFilter{Levels: parser.AlertLevels, FirstSeenSince: &since, Sort: "new", Limit: 200})
 	if err != nil {
 		return res, err
 	}
+	slices.Reverse(newPatterns) // 按首次出现时间正序处理
 	for _, p := range newPatterns {
-		sev := "medium"
-		switch p.Level {
-		case "FATAL":
-			sev = "high"
-		case "WARN":
-			sev = "low"
+		sev := map[string]string{"FATAL": "high", "WARN": "low"}[p.Level]
+		if sev == "" {
+			sev = "medium"
 		}
 		pid := p.ID
 		an := store.Anomaly{
@@ -143,13 +149,8 @@ func (a *Analyzer) Run(ctx context.Context) (Result, error) {
 			Description: fmt.Sprintf("服务 %s 首次出现新的 %s 日志模式：%s", parser.DisplayService(p.Service), p.Level, p.Template),
 		}
 		an.Details, _ = json.Marshal(map[string]any{"template": p.Template, "sample": p.Sample, "count": p.Count})
-		inserted, err := a.store.UpsertAnomaly(ctx, fmt.Sprintf("new_pattern:%d", p.ID), an)
-		if err != nil {
+		if err := record(fmt.Sprintf("new_pattern:%d", p.ID), an); err != nil {
 			return res, err
-		}
-		res.Detected++
-		if inserted {
-			res.NewAnomalies++
 		}
 	}
 	res.DurationMS = time.Since(started).Milliseconds()
@@ -165,7 +166,7 @@ func (a *Analyzer) Trigger() {
 }
 
 // Loop 周期性（以及被 Trigger 时）运行检测，直到 ctx 结束。
-// interval <= 0 时只响应 Trigger。
+// interval <= 0 时只响应 Trigger；由 Trigger 引发的检测之间至少间隔 minTriggerGap。
 func (a *Analyzer) Loop(ctx context.Context, interval time.Duration) {
 	var tick <-chan time.Time
 	if interval > 0 {
@@ -173,25 +174,35 @@ func (a *Analyzer) Loop(ctx context.Context, interval time.Duration) {
 		defer t.Stop()
 		tick = t.C
 	}
+	var lastRun time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick:
 		case <-a.trigger:
+			if wait := minTriggerGap - time.Since(lastRun); wait > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
+			}
 		}
-		{
-			res, err := a.Run(ctx)
-			if err != nil {
-				a.log.Error("analyze failed", "err", err)
-				continue
-			}
-			if res.NewAnomalies > 0 {
-				a.log.Info("anomalies detected", "new", res.NewAnomalies, "total", res.Detected)
-			}
-			if a.AfterRun != nil {
+		lastRun = time.Now()
+		res, err := a.Run(ctx)
+		if err != nil {
+			a.log.Error("analyze failed", "err", err)
+			continue
+		}
+		if res.NewAnomalies > 0 {
+			a.log.Info("anomalies detected", "new", res.NewAnomalies, "total", res.Detected)
+		}
+		if a.AfterRun != nil && a.afterRunning.CompareAndSwap(false, true) {
+			go func() {
+				defer a.afterRunning.Store(false)
 				a.AfterRun(ctx)
-			}
+			}()
 		}
 	}
 }
@@ -217,60 +228,6 @@ func (a *Analyzer) loadSeries(ctx context.Context, from, to time.Time) (map[stri
 		}
 	}
 	return out, nil
-}
-
-type topPattern struct {
-	PatternID int64  `json:"pattern_id"`
-	Template  string `json:"template"`
-	Level     string `json:"level"`
-	Count     int64  `json:"count"`
-}
-
-// topPatterns 给出异常窗口内占比最高的日志模式，作为根因线索。
-func (a *Analyzer) topPatterns(ctx context.Context, service string, from, to time.Time, onlyErrors bool) ([]topPattern, error) {
-	levelCond := ""
-	if onlyErrors {
-		levelCond = "AND l.level IN ('ERROR','FATAL')"
-	}
-	rows, err := a.store.Pool.Query(ctx, `
-		SELECT p.id, p.template, p.level, count(*)
-		FROM logs l JOIN log_patterns p ON p.id = l.pattern_id
-		WHERE l.service = $1 AND l.ts >= $2 AND l.ts < $3 `+levelCond+`
-		GROUP BY p.id, p.template, p.level ORDER BY count(*) DESC LIMIT 5`, service, from, to)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []topPattern{}
-	for rows.Next() {
-		var t topPattern
-		if err := rows.Scan(&t.PatternID, &t.Template, &t.Level, &t.Count); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
-}
-
-func (a *Analyzer) newPatterns(ctx context.Context, since time.Time) ([]store.Pattern, error) {
-	rows, err := a.store.Pool.Query(ctx, `
-		SELECT id, service, level, template, sample, count, first_seen, last_seen
-		FROM log_patterns WHERE level IN ('WARN','ERROR','FATAL') AND first_seen >= $1
-		ORDER BY first_seen DESC LIMIT 200`, since)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []store.Pattern
-	for rows.Next() {
-		var p store.Pattern
-		if err := rows.Scan(&p.ID, &p.Service, &p.Level, &p.Template, &p.Sample, &p.Count, &p.FirstSeen, &p.LastSeen); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].FirstSeen.Before(out[j].FirstSeen) })
-	return out, rows.Err()
 }
 
 func maxTime(a, b time.Time) time.Time {
