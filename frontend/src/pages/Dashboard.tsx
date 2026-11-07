@@ -5,9 +5,8 @@ import { Area, AreaChart, Bar, CartesianGrid, ComposedChart, Line, ReferenceArea
 import { ArrowRight, CheckCircle2, Sparkles, Upload } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type Anomaly, type Level, type TimePoint } from '../lib/api'
-import { durationMs, fmtNumber, fmtPercent, fmtRelative, fmtShortTime, fmtTime, pickBucket, RANGES, svcName, type RangeKey } from '../lib/format'
+import { fmtNumber, fmtPercent, fmtRelative, fmtShortTime, fmtTime, RANGES, svcName, type RangeKey } from '../lib/format'
 import { anomalyKinds, ERROR_LEVELS_PARAM, LEVELS, levelColor, severityStripe } from '../lib/levels'
-import { overviewAllQuery } from '../lib/queries'
 import { logsUrl } from '../lib/url'
 import { useIsDark } from '../lib/theme'
 import Sparkline from '../components/Sparkline'
@@ -16,26 +15,10 @@ import { Card, Empty, ErrorBox, LevelBadge, PageHeader, Segmented, SeverityBadge
 export default function Dashboard() {
   const [params, setParams] = useSearchParams()
   const range = (params.get('range') as RangeKey) || '24h'
-  const base = useQuery(overviewAllQuery)
-  const last = base.data?.last_log
-  const ms = RANGES.find((r) => r.key === range)?.ms ?? 0
-  const rawFrom = last && ms ? new Date(last).getTime() - ms : undefined
-  const bucket = pickBucket(rawFrom !== undefined ? new Date(rawFrom).toISOString() : base.data?.first_log, last)
-  // 起点对齐到时间桶边界：首个桶是完整的；最新日志时间变化时查询键也保持稳定，不会反复重新请求
-  const bucketMs = durationMs(bucket)
-  const from = rawFrom !== undefined ? new Date(Math.floor(rawFrom / bucketMs) * bucketMs).toISOString() : undefined
-
-  // "全部"范围直接使用 base，不再重复请求同样的数据
-  const overview = useQuery({
-    queryKey: ['overview', 'range', from],
-    queryFn: () => api.overview({ from }),
-    enabled: !!from,
-    refetchInterval: 30_000,
-  })
-  const series = useQuery({
-    queryKey: ['timeseries', bucket, from],
-    queryFn: () => api.timeseries({ bucket, from }),
-    enabled: !!base.data,
+  // 起点、时间桶与不完整的桶都由服务端按最新一条日志计算，一次请求返回总览与趋势
+  const dash = useQuery({
+    queryKey: ['dashboard', range],
+    queryFn: () => api.dashboard(range),
     refetchInterval: 30_000,
   })
   const anomalies = useQuery({
@@ -45,8 +28,8 @@ export default function Dashboard() {
   })
   const patterns = useQuery({ queryKey: ['patterns', 'top-errors'], queryFn: () => api.patterns({ level: 'ERROR', limit: 6 }) })
 
-  if (base.error) return <ErrorBox error={base.error} />
-  if (base.data && base.data.total_logs === 0) {
+  if (dash.error) return <ErrorBox error={dash.error} />
+  if (dash.data && !dash.data.range) {
     return (
       <>
         <PageHeader title="总览" />
@@ -60,8 +43,13 @@ export default function Dashboard() {
     )
   }
 
-  const o = from ? overview.data : base.data
-  const pts = series.data ?? []
+  const o = dash.data?.overview
+  const rng = dash.data?.range ?? undefined
+  const from = rng?.from
+  const bucket = rng?.bucket
+  // 不完整的首尾时间桶计数偏低，会被误读为"骤降"：桶足够多时不画
+  const all = dash.data?.series ?? []
+  const pts = all.length > 6 ? all.filter((p) => !p.partial) : all
   const open = anomalies.data ?? []
   const bySeverity = { high: 0, medium: 0, low: 0 }
   open.forEach((a) => bySeverity[a.severity]++)
@@ -88,7 +76,7 @@ export default function Dashboard() {
         <StatCard
           label="日志量" to="/logs"
           value={o ? fmtNumber(o.total_logs) : <Skeleton className="h-8 w-20" />}
-          hint={o && `${o.services} 个服务 · ${base.data?.patterns ?? 0} 种模式`}
+          hint={o && `${o.services} 个服务 · ${o.patterns} 种模式`}
           chart={<Sparkline data={pts.map((p) => p.total)} color="#6366f1" />}
         />
         <StatCard
@@ -116,16 +104,14 @@ export default function Dashboard() {
         title="日志趋势"
         actions={
           <span className="flex items-center gap-3 text-xs text-zinc-500">
-            <span>每 {bucket}</span>
+            {bucket && <span>每 {bucket}</span>}
             {inRange.length > 0 && (
               <span className="flex items-center gap-1"><span className="inline-block size-2.5 rounded-sm bg-red-500/20 ring-1 ring-red-500/40" />异常窗口</span>
             )}
           </span>
         }
       >
-        {series.isPending ? <Skeleton className="h-72" /> : (
-          <TrendCharts points={pts} anomalies={inRange} bucketMs={durationMs(bucket)} first={o?.first_log ?? undefined} last={o?.last_log ?? undefined} />
-        )}
+        {!rng ? <Skeleton className="h-72" /> : <TrendCharts points={pts} anomalies={inRange} bucketMs={rng.bucket_seconds * 1000} />}
       </Card>
 
       <div className="mt-4 grid items-start gap-4 lg:grid-cols-3">
@@ -211,26 +197,12 @@ function Attention({ anomalies, loading }: { anomalies: Anomaly[]; loading: bool
   )
 }
 
-function TrendCharts({ points, anomalies, bucketMs, first, last }: {
-  points: TimePoint[]; anomalies: Anomaly[]; bucketMs: number; first?: string; last?: string
-}) {
+function TrendCharts({ points, anomalies, bucketMs }: { points: TimePoint[]; anomalies: Anomaly[]; bucketMs: number }) {
   const dark = useIsDark()
   const grid = dark ? '#27272a' : '#f4f4f5'
   const axis = { fontSize: 11, fill: dark ? '#71717a' : '#a1a1aa' }
-  const data = useMemo(() => {
-    // 首尾时间桶通常只覆盖了一部分时间，数量偏低会被误读为"骤降"，桶足够多时不显示
-    let rows = points
-    if (rows.length > 6) {
-      const f = first ? new Date(first).getTime() : -Infinity
-      const l = last ? new Date(last).getTime() : Infinity
-      rows = rows.filter((p) => {
-        const s = new Date(p.bucket).getTime()
-        return s >= f && s + bucketMs <= l + 1000
-      })
-    }
-    // 点画在时间桶中点，使柱子覆盖它所代表的时间段，与异常窗口对齐
-    return rows.map((p) => ({ ...p, t: new Date(p.bucket).getTime() + bucketMs / 2 }))
-  }, [points, bucketMs, first, last])
+  // 点画在时间桶中点，使柱子覆盖它所代表的时间段，与异常窗口对齐
+  const data = useMemo(() => points.map((p) => ({ ...p, t: new Date(p.bucket).getTime() + bucketMs / 2 })), [points, bucketMs])
   if (!data.length) return <Empty>所选时间范围内没有日志</Empty>
   const domain: [number, number] = [data[0].t - bucketMs / 2, data[data.length - 1].t + bucketMs / 2]
   const ticks = data.map((d) => d.t - bucketMs / 2)

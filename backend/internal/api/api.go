@@ -13,12 +13,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/eloats/logpulse/backend/internal/analyzer"
 	"github.com/eloats/logpulse/backend/internal/llm"
 	"github.com/eloats/logpulse/backend/internal/parser"
 	"github.com/eloats/logpulse/backend/internal/store"
+	"github.com/eloats/logpulse/backend/internal/timerange"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -42,6 +44,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs", s.searchLogs)
 	mux.HandleFunc("GET /api/stats/overview", s.overview)
 	mux.HandleFunc("GET /api/stats/timeseries", s.timeseries)
+	mux.HandleFunc("GET /api/stats/dashboard", s.dashboard)
 	mux.HandleFunc("GET /api/services", s.services)
 	mux.HandleFunc("GET /api/patterns", s.patterns)
 	mux.HandleFunc("GET /api/anomalies", s.anomalies)
@@ -247,7 +250,10 @@ func (s *Server) searchLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	f, ok := s.filter(w, r)
-	if ok {
+	if !ok {
+		return
+	}
+	if _, ok := s.applyRange(w, r, r.URL.Query().Get("range"), &f, 0); ok {
 		o, err := s.Store.Overview(r.Context(), f.From, f.To)
 		s.reply(w, o, err)
 	}
@@ -258,16 +264,135 @@ func (s *Server) timeseries(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	bucket := time.Minute
-	if b := r.URL.Query().Get("bucket"); b != "" {
-		var err error
-		if bucket, err = time.ParseDuration(b); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid bucket")
-			return
-		}
+	bucket, ok := parseBucket(w, r)
+	if !ok {
+		return
+	}
+	rng, ok := s.applyRange(w, r, r.URL.Query().Get("range"), &f, bucket)
+	if !ok {
+		return
+	}
+	if rng != nil {
+		bucket = rng.Bucket
+	} else if bucket == 0 {
+		bucket = time.Minute
 	}
 	pts, err := s.Store.Timeseries(r.Context(), f, bucket)
-	s.reply(w, pts, err)
+	s.reply(w, fillSeries(pts, rng), err)
+}
+
+// dashboardResponse 是总览页一次请求所需的全部统计。
+type dashboardResponse struct {
+	Range    *timerange.Range  `json:"range"` // 没有任何日志时为 null
+	Overview store.Overview    `json:"overview"`
+	Series   []store.TimePoint `json:"series"`
+}
+
+// dashboard 返回 range（默认 24h，以最新一条日志为锚点）内的总览与趋势。
+// 起点、时间桶、不完整的桶都由服务端计算，客户端按结果渲染即可。
+func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("range")
+	if key == "" {
+		key = "24h"
+	}
+	bucket, ok := parseBucket(w, r)
+	if !ok {
+		return
+	}
+	var f store.LogFilter
+	rng, ok := s.applyRange(w, r, key, &f, bucket)
+	if !ok {
+		return
+	}
+	resp := dashboardResponse{Range: rng, Series: []store.TimePoint{}}
+	if rng == nil { // 还没有日志
+		var err error
+		resp.Overview, err = s.Store.Overview(r.Context(), nil, nil)
+		s.reply(w, resp, err)
+		return
+	}
+	// 总览与趋势互不依赖，并发查询
+	var wg sync.WaitGroup
+	var errO, errS error
+	wg.Add(2)
+	go func() { defer wg.Done(); resp.Overview, errO = s.Store.Overview(r.Context(), f.From, nil) }()
+	go func() { defer wg.Done(); resp.Series, errS = s.Store.Timeseries(r.Context(), f, rng.Bucket) }()
+	wg.Wait()
+	resp.Series = fillSeries(resp.Series, rng)
+	s.reply(w, resp, errors.Join(errO, errS))
+}
+
+// applyRange 解析范围键 key：把起点写入 f.From 并返回范围；key 为空或还没有任何日志时
+// 返回 nil。解析失败时直接返回 400。
+func (s *Server) applyRange(w http.ResponseWriter, r *http.Request, key string, f *store.LogFilter, bucket time.Duration) (*timerange.Range, bool) {
+	if key == "" {
+		return nil, true
+	}
+	if _, err := timerange.Duration(key); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return nil, false
+	}
+	minTS, maxTS, err := s.Store.DataRange(r.Context())
+	if err != nil {
+		s.serverError(w, err)
+		return nil, false
+	}
+	if maxTS == nil {
+		return nil, true
+	}
+	rng, err := timerange.Resolve(key, *minTS, *maxTS, bucket)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return nil, false
+	}
+	f.From = &rng.From
+	return &rng, true
+}
+
+// parseBucket 解析 ?bucket=（如 5m）；未指定时返回 0。
+func parseBucket(w http.ResponseWriter, r *http.Request) (time.Duration, bool) {
+	b := r.URL.Query().Get("bucket")
+	if b == "" {
+		return 0, true
+	}
+	d, err := time.ParseDuration(b)
+	if err != nil || d <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid bucket")
+		return 0, false
+	}
+	return d, true
+}
+
+// maxFilledPoints 限制补零后的点数（自定义极小时间桶 + 长范围时不补零）。
+const maxFilledPoints = 10000
+
+// fillSeries 按范围补齐没有日志的时间桶（计数为 0），并标记不完整的桶。
+// 数据库只返回有日志的桶；不补零时图表会把空档连成一条直线，掩盖"这段时间没有日志"。
+func fillSeries(pts []store.TimePoint, rng *timerange.Range) []store.TimePoint {
+	if rng == nil {
+		return pts
+	}
+	starts := rng.Starts()
+	if len(starts) > maxFilledPoints {
+		for i := range pts {
+			pts[i].Partial = rng.Partial(pts[i].Bucket)
+		}
+		return pts
+	}
+	byStart := make(map[int64]store.TimePoint, len(pts))
+	for _, p := range pts {
+		byStart[p.Bucket.Unix()] = p
+	}
+	out := make([]store.TimePoint, len(starts))
+	for i, t := range starts {
+		p, ok := byStart[t.Unix()]
+		if !ok {
+			p = store.TimePoint{Bucket: t}
+		}
+		p.Partial = rng.Partial(t)
+		out[i] = p
+	}
+	return out
 }
 
 func (s *Server) services(w http.ResponseWriter, r *http.Request) {

@@ -267,6 +267,8 @@ type TimePoint struct {
 	Total  int64     `json:"total"`
 	Errors int64     `json:"errors"`
 	Warns  int64     `json:"warns"`
+	// Partial 表示该时间桶不完整（早于数据起点或尚未结束），仅在按 range 查询时设置
+	Partial bool `json:"partial,omitempty"`
 }
 
 func (s *Store) Services(ctx context.Context) ([]string, error) {

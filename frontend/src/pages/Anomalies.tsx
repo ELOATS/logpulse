@@ -31,6 +31,7 @@ export default function Anomalies() {
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['anomalies'] })
     qc.invalidateQueries({ queryKey: ['overview'] })
+    qc.invalidateQueries({ queryKey: ['dashboard'] })
   }
   const analyze = useMutation({ mutationFn: api.analyze, onSuccess: invalidate })
 

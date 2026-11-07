@@ -212,11 +212,12 @@ func (s *Store) timeseries(ctx context.Context, f LogFilter, bucket time.Duratio
 	if err != nil {
 		return nil, err
 	}
-	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[TimePoint])
-	for i := range out {
-		out[i].Bucket = out[i].Bucket.UTC()
-	}
-	return out, err
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (TimePoint, error) {
+		var p TimePoint
+		err := r.Scan(&p.Bucket, &p.Total, &p.Errors, &p.Warns)
+		p.Bucket = p.Bucket.UTC()
+		return p, err
+	})
 }
 
 // SeriesRow 是异常检测用的 (服务, 桶序号) 计数。

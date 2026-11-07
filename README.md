@@ -127,8 +127,9 @@ JSON 字段会自动识别：时间（`timestamp`/`time`/`ts`/`@timestamp`，支
 | POST | `/api/logs` | 推送日志（JSON 或按行文本），`?service=` 默认服务名 |
 | POST | `/api/logs/upload` | 上传日志文件（字段 `file`、`service`） |
 | GET | `/api/logs` | 检索：`q` `level`（逗号分隔）`service` `host` `pattern_id` `from` `to`（RFC3339）`limit` `offset` |
-| GET | `/api/stats/overview` | 总量、错误率、级别分布、Top 服务（支持 `from`/`to`） |
-| GET | `/api/stats/timeseries` | 时间序列：`bucket`（如 `1m`、`1h`）及与检索相同的筛选参数 |
+| GET | `/api/stats/dashboard` | 总览页所需的全部统计：`range`（`1h` / `6h` / `24h` / `7d` / `all` 或任意时长如 `90m`，默认 `24h`）、可选 `bucket`。返回解析后的范围（以最新一条日志为锚点，起点对齐到时间桶边界，自动选择时间桶）、总览与补齐空桶的趋势，不完整的首尾时间桶标记 `partial` |
+| GET | `/api/stats/overview` | 总量、错误率、级别分布、Top 服务（支持 `from`/`to` 或 `range`） |
+| GET | `/api/stats/timeseries` | 时间序列：`bucket`（如 `1m`、`1h`）及与检索相同的筛选参数；指定 `range` 时由服务端选择时间桶、补齐空桶并标记 `partial` |
 | GET | `/api/services` | 服务列表 |
 | GET | `/api/patterns` | 日志模式：`service` `level` `q` `sort`（`count`/`recent`/`new`）`limit` |
 | GET | `/api/anomalies` | 异常列表：`kind` `severity` `service` `acknowledged` `limit` |

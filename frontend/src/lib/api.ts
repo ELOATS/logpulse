@@ -32,7 +32,24 @@ export interface Overview {
   top_services: { name: string; count: number; errors: number }[]
 }
 
-export interface TimePoint { bucket: string; total: number; errors: number; warns: number }
+export interface TimePoint { bucket: string; total: number; errors: number; warns: number; partial?: boolean }
+
+/** 服务端解析后的时间范围（以最新一条日志为锚点） */
+export interface ResolvedRange {
+  key: string
+  from: string
+  to: string
+  anchor: string
+  data_start: string
+  bucket: string
+  bucket_seconds: number
+}
+
+export interface Dashboard {
+  range: ResolvedRange | null // 还没有日志时为 null
+  overview: Overview
+  series: TimePoint[]
+}
 
 export interface Pattern {
   id: number
@@ -103,6 +120,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   overview: (p?: Params) => request<Overview>(`/api/stats/overview${qs(p)}`),
   timeseries: (p?: Params) => request<TimePoint[]>(`/api/stats/timeseries${qs(p)}`),
+  dashboard: (range: string) => request<Dashboard>(`/api/stats/dashboard${qs({ range })}`),
   services: () => request<string[]>('/api/services'),
   logs: (p?: Params) => request<LogPage>(`/api/logs${qs(p)}`),
   patterns: (p?: Params) => request<Pattern[]>(`/api/patterns${qs(p)}`),
